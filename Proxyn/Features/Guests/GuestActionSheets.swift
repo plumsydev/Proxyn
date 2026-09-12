@@ -1,13 +1,12 @@
 import SwiftUI
 
-/// Shared chrome for the action sheets: dark canvas, title, cancel + confirm.
-struct SheetScaffold<Content: View>: View {
+/// Shared chrome for action sheets: a form with Cancel and a confirm button in
+/// the navigation bar, and a progress state while the request is in flight.
+private struct ActionForm<Content: View>: View {
     var title: String
-    var subtitle: String?
-    var confirmLabel: String
-    var confirmEnabled: Bool = true
-    var destructive: Bool = false
-    var busy: Bool = false
+    var confirmTitle: String
+    var canConfirm: Bool
+    var isWorking: Bool
     var onConfirm: () -> Void
     @ViewBuilder var content: Content
 
@@ -15,58 +14,26 @@ struct SheetScaffold<Content: View>: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                Palette.sheetCanvas.ignoresSafeArea()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        if let subtitle {
-                            Text(subtitle)
-                                .font(.system(size: 13))
-                                .foregroundStyle(Palette.inkSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        content
+            Form { content }
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
                     }
-                    .padding(18)
-                    .padding(.bottom, 8)
-                }
-                .scrollIndicators(.hidden)
-                .scrollDismissesKeyboard(.interactively)
-                // Pinned so the primary action stays reachable at any detent.
-                .safeAreaInset(edge: .bottom) {
-                    Button(action: onConfirm) {
-                        HStack(spacing: 8) {
-                            if busy { ProgressView().controlSize(.small).tint(.black) }
-                            Text(confirmLabel)
+                    ToolbarItem(placement: .confirmationAction) {
+                        if isWorking {
+                            ProgressView()
+                        } else {
+                            Button(confirmTitle, action: onConfirm)
+                                .fontWeight(.semibold)
+                                .disabled(!canConfirm)
                         }
                     }
-                    .buttonStyle(ProminentButtonStyle(tint: destructive ? Palette.rose : Palette.ember))
-                    .disabled(!confirmEnabled || busy)
-                    .opacity(confirmEnabled ? 1 : 0.5)
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
-                    .padding(.bottom, 14)
-                    .background {
-                        Rectangle()
-                            .fill(.ultraThinMaterial)
-                            .overlay(Rectangle().fill(Palette.canvas.opacity(0.6)))
-                            .overlay(alignment: .top) { Divider1px() }
-                            .ignoresSafeArea(edges: .bottom)
-                    }
                 }
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Annuler") { dismiss() }.foregroundStyle(Palette.inkSecondary)
-                }
-            }
+                .disabled(isWorking)
+                .interactiveDismissDisabled(isWorking)
         }
-        .presentationBackground(Palette.sheetCanvas)
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
     }
 }
 
@@ -78,57 +45,59 @@ struct SnapshotSheet: View {
     let ref: GuestRef
     var onDone: () async -> Void
 
-    @State private var name = ""
-    @State private var description = ""
+    @State private var name = SnapshotSheet.suggestedName()
+    @State private var notes = ""
     @State private var includeRAM = false
-    @State private var busy = false
+    @State private var working = false
 
-    private var suggestedName: String {
+    /// Proxmox snapshot names: letters, digits, `-` and `_`, starting with a letter.
+    private var isValidName: Bool {
+        name.range(of: "^[A-Za-z][A-Za-z0-9_-]{1,39}$", options: .regularExpression) != nil
+    }
+
+    static func suggestedName() -> String {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyyMMdd-HHmm"
-        return "proxyn-\(f.string(from: Date()))"
+        return "snap-\(f.string(from: Date()))"
     }
 
     var body: some View {
-        SheetScaffold(
-            title: "Nouveau snapshot",
-            subtitle: "Un snapshot fige l'état des disques de l'instance #\(ref.vmid). Il est instantané mais reste stocké sur le même support que la VM — ce n'est pas une sauvegarde.",
-            confirmLabel: "Créer le snapshot",
-            confirmEnabled: !name.isEmpty,
-            busy: busy,
-            onConfirm: create
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    ProxynField(label: "Nom", placeholder: suggestedName, text: $name,
-                                symbol: "tag.fill", monospaced: true)
-                    ProxynField(label: "Description", placeholder: "Avant mise à jour…",
-                                text: $description, symbol: "text.alignleft",
-                                autocapitalization: .sentences)
-                    if ref.kind == .qemu {
-                        Divider1px()
-                        ToggleRow(title: "Inclure la RAM",
-                                  subtitle: "Enregistre l'état mémoire pour reprendre exactement où la VM en était. Plus lent et plus volumineux.",
-                                  symbol: "memorychip.fill",
-                                  isOn: $includeRAM)
-                    }
+        ActionForm(title: "Take Snapshot", confirmTitle: "Take",
+                   canConfirm: isValidName, isWorking: working, onConfirm: submit) {
+            Section {
+                TextField("Name", text: $name)
+                    .font(.body.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                TextField("Description", text: $notes, axis: .vertical)
+                    .lineLimit(1...4)
+            } footer: {
+                if !isValidName {
+                    Text("Use letters, numbers, hyphens and underscores, starting with a letter.")
+                        .foregroundStyle(Palette.critical)
+                }
+            }
+
+            if ref.kind == .qemu {
+                Section {
+                    Toggle("Include RAM", isOn: $includeRAM)
+                } footer: {
+                    Text("Saves the running memory so the VM resumes exactly where it was. Slower and larger.")
                 }
             }
         }
-        .onAppear { if name.isEmpty { name = suggestedName } }
     }
 
-    private func create() {
-        busy = true
+    private func submit() {
+        working = true
         Task {
-            let clean = name.replacingOccurrences(of: " ", with: "-")
-            await app.perform("Snapshot \(clean)", node: ref.node) { api in
-                try await api.createSnapshot(ref, name: clean,
-                                            description: description, includeRAM: includeRAM)
+            let ok = await app.perform("Snapshot \(name)", node: ref.node) { api in
+                try await api.createSnapshot(ref, name: name, description: notes, includeRAM: includeRAM)
             }
             await onDone()
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
@@ -146,78 +115,76 @@ struct CloneSheet: View {
     @State private var fullClone = true
     @State private var targetNode = ""
     @State private var storage = ""
-    @State private var busy = false
+    @State private var working = false
 
-    private var nodes: [StringOption] {
-        [StringOption("", "Même nœud")] + app.snapshot.nodes.map { StringOption($0.displayName) }
+    private var takenIDs: Set<Int> { Set(app.snapshot.guests.compactMap(\.vmid)) }
+
+    private var idError: String? {
+        guard let id = Int(newID) else { return newID.isEmpty ? nil : "Enter a number." }
+        if id < 100 || id > 999_999_999 { return "IDs range from 100 to 999999999." }
+        if takenIDs.contains(id) { return "ID \(id) is already in use." }
+        return nil
     }
 
-    private var storages: [StringOption] {
-        [StringOption("", "Par défaut")] + app.snapshot.uniqueStorages
+    private var storages: [String] {
+        Array(Set(app.snapshot.storages
             .filter { ($0.content ?? "").contains("images") || ($0.content ?? "").contains("rootdir") }
-            .compactMap { $0.storage }
-            .map { StringOption($0) }
+            .compactMap(\.storage))).sorted()
     }
 
     var body: some View {
-        SheetScaffold(
-            title: "Cloner",
-            subtitle: "Duplique \(currentName) (#\(ref.vmid)). Un clone lié partage les disques du modèle et démarre instantanément ; un clone complet copie tout.",
-            confirmLabel: "Lancer le clonage",
-            confirmEnabled: Int(newID) != nil,
-            busy: busy,
-            onConfirm: clone
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 12) {
-                        ProxynField(label: "Nouvel ID", placeholder: "100", text: $newID,
-                                    symbol: "number", keyboard: .numberPad, monospaced: true)
-                            .frame(width: 130)
-                        ProxynField(label: "Nom", placeholder: "\(currentName)-copie", text: $name,
-                                    symbol: "tag.fill")
-                    }
-                    Divider1px()
-                    ToggleRow(title: "Clone complet",
-                              subtitle: fullClone
-                              ? "Copie intégrale des disques. Indépendant de l'original."
-                              : "Clone lié : rapide et peu coûteux, mais dépend de l'original (modèles uniquement).",
-                              symbol: "doc.on.doc.fill", isOn: $fullClone)
-                    Divider1px()
-                    PickerRow(title: "Nœud cible", symbol: "server.rack", options: nodes,
-                              label: \.title,
-                              selection: Binding(
-                                get: { nodes.first { $0.value == targetNode } ?? nodes[0] },
-                                set: { targetNode = $0.value }))
-                    if fullClone {
-                        PickerRow(title: "Stockage", symbol: "internaldrive.fill", options: storages,
-                                  label: \.title,
-                                  selection: Binding(
-                                    get: { storages.first { $0.value == storage } ?? storages[0] },
-                                    set: { storage = $0.value }))
+        ActionForm(title: "Clone", confirmTitle: "Clone",
+                   canConfirm: Int(newID) != nil && idError == nil, isWorking: working, onConfirm: submit) {
+            Section {
+                TextField("New ID", text: $newID)
+                    .keyboardType(.numberPad)
+                TextField("Name", text: $name)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } footer: {
+                if let idError { Text(idError).foregroundStyle(Palette.critical) }
+            }
+
+            Section {
+                Picker("Mode", selection: $fullClone) {
+                    Text("Full Clone").tag(true)
+                    Text("Linked Clone").tag(false)
+                }
+                Picker("Target Node", selection: $targetNode) {
+                    Text("Same Node (\(ref.node))").tag("")
+                    ForEach(app.snapshot.onlineNodes.map(\.displayName).filter { $0 != ref.node }, id: \.self) {
+                        Text($0).tag($0)
                     }
                 }
+                if fullClone {
+                    Picker("Storage", selection: $storage) {
+                        Text("Same as Source").tag("")
+                        ForEach(storages, id: \.self) { Text($0).tag($0) }
+                    }
+                }
+            } footer: {
+                Text(fullClone
+                     ? "A full clone copies every disk and is independent of the source."
+                     : "A linked clone shares disks with the source template. It's fast but depends on it.")
             }
         }
         .task {
-            if newID.isEmpty, let next = try? await app.client()?.nextVMID() {
-                newID = String(next)
-            }
-            if name.isEmpty { name = "\(currentName)-copie" }
+            if newID.isEmpty, let next = try? await app.client()?.nextVMID() { newID = String(next) }
+            if name.isEmpty { name = "\(currentName)-clone" }
         }
     }
 
-    private func clone() {
+    private func submit() {
         guard let id = Int(newID) else { return }
-        busy = true
+        working = true
         Task {
-            await app.perform("Clonage vers #\(id)", node: ref.node) { api in
+            let ok = await app.perform("Clone to \(id)", node: ref.node) { api in
                 try await api.cloneGuest(ref, newID: id, name: name, full: fullClone,
                                          targetNode: targetNode.isEmpty ? nil : targetNode,
                                          storage: storage.isEmpty ? nil : storage)
             }
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
@@ -232,64 +199,47 @@ struct MigrateSheet: View {
     @State private var target = ""
     @State private var online = true
     @State private var withLocalDisks = false
-    @State private var busy = false
+    @State private var working = false
 
-    private var candidates: [StringOption] {
-        app.snapshot.onlineNodes
-            .map(\.displayName)
-            .filter { $0 != ref.node }
-            .map { StringOption($0) }
+    private var candidates: [String] {
+        app.snapshot.onlineNodes.map(\.displayName).filter { $0 != ref.node }
     }
 
     var body: some View {
-        SheetScaffold(
-            title: "Migrer",
-            subtitle: candidates.isEmpty
-            ? "Aucun autre nœud en ligne dans ce cluster."
-            : "Déplace l'instance #\(ref.vmid) depuis \(ref.node) vers un autre nœud du cluster.",
-            confirmLabel: "Migrer",
-            confirmEnabled: !target.isEmpty,
-            busy: busy,
-            onConfirm: migrate
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    if candidates.isEmpty {
-                        Text("La migration nécessite au moins deux nœuds en ligne.")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Palette.inkTertiary)
-                    } else {
-                        PickerRow(title: "Nœud de destination", symbol: "arrow.right.circle.fill",
-                                  options: candidates, label: \.title,
-                                  selection: Binding(
-                                    get: { candidates.first { $0.value == target } ?? candidates[0] },
-                                    set: { target = $0.value }))
-                        Divider1px()
-                        ToggleRow(title: ref.kind == .qemu ? "Migration à chaud" : "Redémarrage autorisé",
-                                  subtitle: ref.kind == .qemu
-                                  ? "La VM reste allumée pendant le transfert de sa mémoire."
-                                  : "Le conteneur est brièvement redémarré sur le nœud cible.",
-                                  symbol: "bolt.fill", isOn: $online)
-                        ToggleRow(title: "Inclure les disques locaux",
-                                  subtitle: "Nécessaire si l'instance utilise un stockage non partagé.",
-                                  symbol: "internaldrive.fill", isOn: $withLocalDisks)
+        ActionForm(title: "Migrate", confirmTitle: "Migrate",
+                   canConfirm: !target.isEmpty, isWorking: working, onConfirm: submit) {
+            if candidates.isEmpty {
+                Section {
+                    ContentUnavailableView("No Other Nodes", systemImage: "server.rack",
+                                           description: Text("Migration needs at least one other online node in the cluster."))
+                }
+            } else {
+                Section {
+                    Picker("Target Node", selection: $target) {
+                        ForEach(candidates, id: \.self) { Text($0).tag($0) }
                     }
+                }
+                Section {
+                    Toggle(ref.kind == .qemu ? "Live Migration" : "Restart Migration", isOn: $online)
+                    Toggle("Include Local Disks", isOn: $withLocalDisks)
+                } footer: {
+                    Text(ref.kind == .qemu
+                         ? "A live migration keeps the VM running while its memory is transferred."
+                         : "The container is stopped, moved and started again on the target node.")
                 }
             }
         }
-        .onAppear { if target.isEmpty { target = candidates.first?.value ?? "" } }
+        .onAppear { if target.isEmpty { target = candidates.first ?? "" } }
     }
 
-    private func migrate() {
-        guard !target.isEmpty else { return }
-        busy = true
+    private func submit() {
+        working = true
         Task {
-            await app.perform("Migration vers \(target)", node: ref.node) { api in
-                try await api.migrateGuest(ref, to: target, online: online,
-                                           withLocalDisks: withLocalDisks)
+            let ok = await app.perform("Migrate to \(target)", node: ref.node) { api in
+                try await api.migrateGuest(ref, to: target, online: online, withLocalDisks: withLocalDisks)
             }
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
@@ -304,189 +254,137 @@ struct BackupSheet: View {
 
     @State private var storage = ""
     @State private var mode = "snapshot"
-    @State private var compress = "zstd"
+    @State private var compression = "zstd"
     @State private var notes = ""
     @State private var isProtected = false
-    @State private var busy = false
+    @State private var working = false
 
-    private var storages: [StringOption] {
-        app.snapshot.storages
+    private var storages: [String] {
+        Array(Set(app.snapshot.storages
             .filter { ($0.content ?? "").contains("backup") && ($0.node == ref.node || $0.shared) }
-            .compactMap { $0.storage }
-            .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-            .map { StringOption($0) }
+            .compactMap(\.storage))).sorted()
     }
 
-    private let modes = [StringOption("snapshot", "Snapshot (sans interruption)"),
-                         StringOption("suspend", "Suspend"),
-                         StringOption("stop", "Stop (cohérence maximale)")]
-    private let compressions = [StringOption("zstd", "ZSTD (rapide)"),
-                                StringOption("lzo", "LZO"),
-                                StringOption("gzip", "GZIP"),
-                                StringOption("0", "Aucune")]
-
     var body: some View {
-        SheetScaffold(
-            title: "Sauvegarder",
-            subtitle: "Crée une archive vzdump de l'instance #\(ref.vmid) sur un stockage de sauvegarde.",
-            confirmLabel: "Lancer la sauvegarde",
-            confirmEnabled: !storage.isEmpty,
-            busy: busy,
-            onConfirm: backup
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    if storages.isEmpty {
-                        Text("Aucun stockage acceptant le contenu « backup » n'est disponible sur \(ref.node).")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Palette.inkTertiary)
-                    } else {
-                        PickerRow(title: "Stockage", symbol: "externaldrive.fill", options: storages,
-                                  label: \.title,
-                                  selection: Binding(
-                                    get: { storages.first { $0.value == storage } ?? storages[0] },
-                                    set: { storage = $0.value }))
-                        PickerRow(title: "Mode", symbol: "camera.aperture", options: modes,
-                                  label: \.title,
-                                  selection: Binding(
-                                    get: { modes.first { $0.value == mode } ?? modes[0] },
-                                    set: { mode = $0.value }))
-                        PickerRow(title: "Compression", symbol: "rectangle.compress.vertical",
-                                  options: compressions, label: \.title,
-                                  selection: Binding(
-                                    get: { compressions.first { $0.value == compress } ?? compressions[0] },
-                                    set: { compress = $0.value }))
-                        Divider1px()
-                        ProxynField(label: "Note", placeholder: "Avant migration…", text: $notes,
-                                    symbol: "text.alignleft", autocapitalization: .sentences)
-                        ToggleRow(title: "Protéger la sauvegarde",
-                                  subtitle: "Exclue de la rotation automatique des anciennes sauvegardes.",
-                                  symbol: "lock.fill", isOn: $isProtected)
+        ActionForm(title: "Back Up Now", confirmTitle: "Back Up",
+                   canConfirm: !storage.isEmpty, isWorking: working, onConfirm: submit) {
+            if storages.isEmpty {
+                Section {
+                    ContentUnavailableView("No Backup Storage", systemImage: "externaldrive",
+                                           description: Text("No storage on \(ref.node) accepts backups."))
+                }
+            } else {
+                Section {
+                    Picker("Storage", selection: $storage) {
+                        ForEach(storages, id: \.self) { Text($0).tag($0) }
                     }
+                    Picker("Mode", selection: $mode) {
+                        Text("Snapshot").tag("snapshot")
+                        Text("Suspend").tag("suspend")
+                        Text("Stop").tag("stop")
+                    }
+                    Picker("Compression", selection: $compression) {
+                        Text("Zstandard").tag("zstd")
+                        Text("LZO").tag("lzo")
+                        Text("Gzip").tag("gzip")
+                        Text("None").tag("0")
+                    }
+                } footer: {
+                    Text("Snapshot mode backs up without downtime. Stop mode gives the most consistent result.")
+                }
+
+                Section {
+                    TextField("Notes", text: $notes, axis: .vertical)
+                        .lineLimit(1...4)
+                    Toggle("Protected", isOn: $isProtected)
+                } footer: {
+                    Text("Protected backups are skipped by automatic pruning.")
                 }
             }
         }
-        .onAppear { if storage.isEmpty { storage = storages.first?.value ?? "" } }
+        .onAppear { if storage.isEmpty { storage = storages.first ?? "" } }
     }
 
-    private func backup() {
-        guard !storage.isEmpty else { return }
-        busy = true
+    private func submit() {
+        working = true
         Task {
-            await app.perform("Sauvegarde #\(ref.vmid)", node: ref.node) { api in
-                try await api.backupNow(node: ref.node, vmid: ref.vmid, storage: storage,
-                                        mode: mode, compress: compress,
-                                        notes: notes.isEmpty ? nil : notes,
+            let ok = await app.perform("Back up \(ref.kind.label) \(ref.vmid)", node: ref.node) { api in
+                try await api.backupNow(node: ref.node, vmid: ref.vmid, storage: storage, mode: mode,
+                                        compress: compression, notes: notes.isEmpty ? nil : notes,
                                         isProtected: isProtected)
             }
             await onDone()
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
 
-// MARK: - CPU / RAM
+// MARK: - CPU & memory
 
 struct EditResourcesSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     let ref: GuestRef
-    let kind: PVEResourceType
+    let originalCores: Int
+    let originalMemoryMB: Int
     var onDone: () async -> Void
 
-    @State private var cores: Double
-    @State private var memoryMB: Double
-    @State private var busy = false
+    @State private var cores: Int
+    @State private var memoryMB: Int
+    @State private var working = false
 
-    init(ref: GuestRef, cores: Int, memoryMB: Int, kind: PVEResourceType,
-         onDone: @escaping () async -> Void) {
+    init(ref: GuestRef, cores: Int, memoryMB: Int, onDone: @escaping () async -> Void) {
         self.ref = ref
-        self.kind = kind
+        self.originalCores = max(1, cores)
+        self.originalMemoryMB = max(128, memoryMB)
         self.onDone = onDone
-        _cores = State(initialValue: Double(max(1, cores)))
-        _memoryMB = State(initialValue: Double(max(64, memoryMB)))
+        _cores = State(initialValue: max(1, cores))
+        _memoryMB = State(initialValue: max(128, memoryMB))
+    }
+
+    private var nodeResource: PVEResource? {
+        app.snapshot.nodes.first { $0.displayName == ref.node }
+    }
+
+    private var maxCores: Int { max(originalCores, Int(nodeResource?.maxcpu ?? 64)) }
+
+    private var memoryOptions: [Int] {
+        let presets = [512, 1024, 2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 131072]
+        let limit = Int((nodeResource?.maxmem ?? 1_099_511_627_776) / 1_048_576)
+        return Array(Set(presets.filter { $0 <= limit } + [originalMemoryMB])).sorted()
     }
 
     var body: some View {
-        SheetScaffold(
-            title: "Ressources",
-            subtitle: "Les changements sont appliqués immédiatement pour un conteneur. Pour une VM sans hotplug, ils prennent effet au prochain démarrage.",
-            confirmLabel: "Appliquer",
-            busy: busy,
-            onConfirm: apply
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack {
-                            Label("Cœurs virtuels", systemImage: "cpu.fill")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Palette.inkSecondary)
-                            Spacer()
-                            Text("\(Int(cores))")
-                                .font(.display(20, weight: .bold))
-                                .monospacedDigit()
-                                .foregroundStyle(Palette.ember)
-                                .contentTransition(.numericText())
-                        }
-                        Slider(value: $cores, in: 1...Double(maxCores), step: 1)
-                            .tint(Palette.ember)
-                    }
-
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack {
-                            Label("Mémoire", systemImage: "memorychip.fill")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Palette.inkSecondary)
-                            Spacer()
-                            Text(Format.bytes(memoryMB * 1_048_576))
-                                .font(.display(20, weight: .bold))
-                                .monospacedDigit()
-                                .foregroundStyle(Palette.sky)
-                                .contentTransition(.numericText())
-                        }
-                        Slider(value: $memoryMB, in: 128...Double(maxMemoryMB), step: 128)
-                            .tint(Palette.sky)
-                        HStack {
-                            ForEach([1024, 2048, 4096, 8192, 16384], id: \.self) { preset in
-                                if preset <= maxMemoryMB {
-                                    Button {
-                                        Haptics.select()
-                                        withAnimation(Motion.snap) { memoryMB = Double(preset) }
-                                    } label: {
-                                        Text(preset >= 1024 ? "\(preset / 1024) Go" : "\(preset) Mo")
-                                            .font(.system(size: 11, weight: .semibold))
-                                    }
-                                    .buttonStyle(QuietButtonStyle(tint: Palette.inkSecondary))
-                                }
-                            }
-                        }
+        ActionForm(title: "CPU and Memory", confirmTitle: "Save",
+                   canConfirm: cores != originalCores || memoryMB != originalMemoryMB,
+                   isWorking: working, onConfirm: submit) {
+            Section {
+                Stepper(value: $cores, in: 1...maxCores) {
+                    LabeledContent("Cores", value: "\(cores)")
+                }
+                Picker("Memory", selection: $memoryMB) {
+                    ForEach(memoryOptions, id: \.self) { mb in
+                        Text(Format.bytes(Double(mb) * 1_048_576)).tag(mb)
                     }
                 }
+            } footer: {
+                Text(ref.kind == .lxc
+                     ? "Changes apply to the running container immediately."
+                     : "Without CPU and memory hotplug, changes take effect the next time the VM starts.")
             }
         }
     }
 
-    private var maxCores: Int {
-        Int(app.snapshot.nodes.first { $0.displayName == ref.node }?.maxcpu ?? 32)
-    }
-
-    private var maxMemoryMB: Int {
-        let bytes = app.snapshot.nodes.first { $0.displayName == ref.node }?.maxmem ?? (64 * 1_073_741_824)
-        return max(1024, Int(bytes / 1_048_576))
-    }
-
-    private func apply() {
-        busy = true
+    private func submit() {
+        working = true
         Task {
-            let values = ["memory": String(Int(memoryMB)), "cores": String(Int(cores))]
-            await app.perform("Ressources mises à jour", node: ref.node) { api in
-                try await api.updateGuestConfig(ref, values: values)
+            let ok = await app.perform("Update resources", node: ref.node) { api in
+                try await api.updateGuestConfig(ref, values: ["cores": String(cores), "memory": String(memoryMB)])
             }
             await onDone()
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
@@ -501,66 +399,37 @@ struct ResizeDiskSheet: View {
     var onDone: () async -> Void
 
     @State private var disk = ""
-    @State private var increaseGB: Double = 10
-    @State private var busy = false
+    @State private var gigabytes = 10
+    @State private var working = false
 
-    private var options: [StringOption] {
-        disks.filter { !$0.hasPrefix("unused") }.map { StringOption($0) }
-    }
+    private var resizable: [String] { disks.filter { !$0.hasPrefix("unused") && !$0.hasPrefix("efidisk") && !$0.hasPrefix("tpmstate") } }
 
     var body: some View {
-        SheetScaffold(
-            title: "Agrandir un disque",
-            subtitle: "Proxmox ne sait qu'agrandir un disque virtuel : la taille indiquée est ajoutée à l'existant. Il faudra ensuite étendre la partition dans l'invité.",
-            confirmLabel: "Ajouter \(Int(increaseGB)) Go",
-            confirmEnabled: !disk.isEmpty,
-            busy: busy,
-            onConfirm: resize
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 18) {
-                    if options.isEmpty {
-                        Text("Aucun disque redimensionnable détecté.")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Palette.inkTertiary)
-                    } else {
-                        PickerRow(title: "Disque", symbol: "internaldrive.fill", options: options,
-                                  label: \.title,
-                                  selection: Binding(
-                                    get: { options.first { $0.value == disk } ?? options[0] },
-                                    set: { disk = $0.value }))
-                        VStack(alignment: .leading, spacing: 9) {
-                            HStack {
-                                Text("Espace ajouté")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(Palette.inkSecondary)
-                                Spacer()
-                                Text("+\(Int(increaseGB)) Go")
-                                    .font(.display(20, weight: .bold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(Palette.amber)
-                                    .contentTransition(.numericText())
-                            }
-                            Slider(value: $increaseGB, in: 1...500, step: 1)
-                                .tint(Palette.amber)
-                        }
-                    }
+        ActionForm(title: "Resize Disk", confirmTitle: "Resize",
+                   canConfirm: !disk.isEmpty && gigabytes > 0, isWorking: working, onConfirm: submit) {
+            Section {
+                Picker("Disk", selection: $disk) {
+                    ForEach(resizable, id: \.self) { Text($0).tag($0) }
                 }
+                Stepper(value: $gigabytes, in: 1...4096) {
+                    LabeledContent("Add", value: "\(gigabytes) GiB")
+                }
+            } footer: {
+                Text("Proxmox can only grow a disk. Extend the partition and filesystem inside the guest afterwards.")
             }
         }
-        .onAppear { if disk.isEmpty { disk = options.first?.value ?? "" } }
+        .onAppear { if disk.isEmpty { disk = resizable.first ?? "" } }
     }
 
-    private func resize() {
-        guard !disk.isEmpty else { return }
-        busy = true
+    private func submit() {
+        working = true
         Task {
-            await app.perform("Agrandissement de \(disk)", node: ref.node) { api in
-                try await api.resizeDisk(ref, disk: disk, sizeIncrement: "+\(Int(increaseGB))G")
+            let ok = await app.perform("Resize \(disk)", node: ref.node) { api in
+                try await api.resizeDisk(ref, disk: disk, sizeIncrement: "+\(gigabytes)G")
             }
             await onDone()
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
