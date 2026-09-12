@@ -115,19 +115,19 @@ final class GuestDetailModel {
     }
 
     var cpuSeries: [MetricSeries] {
-        [metrics.series("cpu", label: "CPU", unit: .percent, color: "ember")]
+        [metrics.series("cpu", label: "CPU", unit: .percent, color: "primary")]
     }
     var memorySeries: [MetricSeries] {
-        [metrics.series("mem", label: "Utilisée", unit: .bytes, color: "sky"),
-         metrics.series("maxmem", label: "Allouée", unit: .bytes, color: "violet")]
+        [metrics.series("mem", label: "Used", unit: .bytes, color: "primary"),
+         metrics.series("maxmem", label: "Allocated", unit: .bytes, color: "secondary")]
     }
     var networkSeries: [MetricSeries] {
-        [metrics.series("netin", label: "Entrant", unit: .bytesPerSecond, color: "sky"),
-         metrics.series("netout", label: "Sortant", unit: .bytesPerSecond, color: "mint")]
+        [metrics.series("netin", label: "In", unit: .bytesPerSecond, color: "primary"),
+         metrics.series("netout", label: "Out", unit: .bytesPerSecond, color: "secondary")]
     }
     var diskSeries: [MetricSeries] {
-        [metrics.series("diskread", label: "Lecture", unit: .bytesPerSecond, color: "amber"),
-         metrics.series("diskwrite", label: "Écriture", unit: .bytesPerSecond, color: "rose")]
+        [metrics.series("diskread", label: "Read", unit: .bytesPerSecond, color: "primary"),
+         metrics.series("diskwrite", label: "Write", unit: .bytesPerSecond, color: "secondary")]
     }
 
     /// Disk entries from the config (`scsi0`, `virtio1`, `rootfs`, `mp0`…).
@@ -151,6 +151,21 @@ final class GuestDetailModel {
     }
 
     var memoryMB: Int { config["memory"]?.intValue ?? Int((status?.maxmem ?? 0) / 1_048_576) }
+
+    /// `l26` → "Linux", `win11` → "Windows 11"…
+    var osName: String {
+        if ref.kind == .lxc {
+            return config["ostype"]?.displayString.capitalized ?? "Linux container"
+        }
+        let names = [
+            "l26": "Linux", "l24": "Linux 2.4", "win11": "Windows 11", "win10": "Windows 10",
+            "win8": "Windows 8", "win7": "Windows 7", "wvista": "Windows Vista", "wxp": "Windows XP",
+            "w2k": "Windows 2000", "w2k3": "Windows Server 2003", "w2k8": "Windows Server 2008",
+            "solaris": "Solaris", "other": "Other"
+        ]
+        let raw = config["ostype"]?.displayString ?? ""
+        return names[raw] ?? (raw.isEmpty ? "—" : raw)
+    }
 
     var osType: String {
         config["ostype"]?.displayString ?? config["ostemplate"]?.displayString ?? "—"
