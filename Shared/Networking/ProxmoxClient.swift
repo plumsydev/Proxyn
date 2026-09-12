@@ -21,10 +21,16 @@ actor ProxmoxClient {
     private var pveSession: PVESession?
     private var inFlightLogin: Task<PVESession, Error>?
     private let demo: DemoBackend?
+    /// Used while validating a server before it is saved, so a failed attempt
+    /// never replaces a working secret in the Keychain.
+    private let secretOverride: String?
 
-    init(profile: ServerProfile) {
+    private var secret: String? { secretOverride ?? profile.secret }
+
+    init(profile: ServerProfile, secretOverride: String? = nil) {
         self.profile = profile
-        let delegate = TLSTrustDelegate(allowInsecure: profile.allowInsecureTLS,
+        self.secretOverride = secretOverride
+        let delegate = TLSTrustDelegate(skipVerification: profile.skipCertificateVerification,
                                         pinnedFingerprint: profile.pinnedCertificateSHA256)
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 20
@@ -33,11 +39,16 @@ actor ProxmoxClient {
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.httpAdditionalHeaders = ["User-Agent": "Proxyn/1.0 (iOS)"]
+        config.httpAdditionalHeaders = ["User-Agent": Self.userAgent]
         self.trustDelegate = delegate
         self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         self.demo = profile.isDemo ? DemoBackend() : nil
     }
+
+    private static let userAgent: String = {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        return "Proxyn/\(version)"
+    }()
 
     // MARK: - Session state
 
@@ -53,10 +64,10 @@ actor ProxmoxClient {
     func consoleCredentials() async throws -> PVESession {
         if profile.isDemo {
             throw ProxmoxError.forbidden(
-                "La console n'est pas disponible dans le cluster de démonstration — connectez un vrai serveur Proxmox pour ouvrir un terminal ou noVNC.")
+                "The console isn't available in the demo cluster. Connect a real Proxmox server to open a shell or noVNC.")
         }
         guard profile.authMethod == .ticket else { throw ProxmoxError.forbidden(
-            "La console nécessite une connexion par identifiants (les jetons d'API ne peuvent pas ouvrir de console)."
+            "The console requires password sign-in. Proxmox doesn't allow API tokens to open console sessions."
         ) }
         return try await ensureSession()
     }
@@ -68,7 +79,7 @@ actor ProxmoxClient {
         guard profile.authMethod == .ticket else {
             throw ProxmoxError.forbidden("Ce serveur utilise un jeton d'API.")
         }
-        guard let secret = profile.secret, !secret.isEmpty else { throw ProxmoxError.missingSecret }
+        guard let secret, !secret.isEmpty else { throw ProxmoxError.missingSecret }
 
         var form: [String: String] = ["username": profile.fullUsername]
         if let totpCode, let tfaChallenge {
@@ -157,7 +168,7 @@ actor ProxmoxClient {
             if let data = demo.response(method: method, path: path, query: query, form: form) {
                 return data
             }
-            throw ProxmoxError.httpStatus(501, "Endpoint non simulé en mode démo.")
+            throw ProxmoxError.httpStatus(501, "Not available in the demo cluster.")
         }
 
         guard let apiURL = profile.apiURL,
@@ -183,7 +194,7 @@ actor ProxmoxClient {
         if authenticated {
             switch profile.authMethod {
             case .apiToken:
-                guard let secret = profile.secret, !secret.isEmpty else { throw ProxmoxError.missingSecret }
+                guard let secret, !secret.isEmpty else { throw ProxmoxError.missingSecret }
                 request.setValue("PVEAPIToken=\(profile.tokenIdentifier)=\(secret)",
                                  forHTTPHeaderField: "Authorization")
             case .ticket:
@@ -199,30 +210,16 @@ actor ProxmoxClient {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
-        } catch let error as URLError {
-            switch error.code {
-            case .cancelled:
-                throw ProxmoxError.cancelled
-            case .serverCertificateUntrusted, .serverCertificateHasBadDate,
-                 .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
-                 .secureConnectionFailed, .clientCertificateRejected:
-                throw ProxmoxError.tlsRejected(host: profile.host,
-                                               fingerprint: trustDelegate.lastSeenFingerprint)
-            case .cannotFindHost, .cannotConnectToHost:
-                throw ProxmoxError.transport("Impossible de joindre \(profile.host):\(profile.port).")
-            case .timedOut:
-                throw ProxmoxError.transport("Le serveur n'a pas répondu à temps.")
-            case .notConnectedToInternet:
-                throw ProxmoxError.transport("Aucune connexion réseau.")
-            default:
-                throw ProxmoxError.transport(error.localizedDescription)
-            }
         } catch {
-            throw ProxmoxError.transport(error.localizedDescription)
+            throw mapTransportError(error)
         }
 
         guard let http = response as? HTTPURLResponse else {
-            throw ProxmoxError.transport("Réponse HTTP invalide.")
+            throw ProxmoxError.transport("The server sent an invalid HTTP response.")
+        }
+
+        if !(200..<300).contains(http.statusCode) {
+            Log.network.error("\(method, privacy: .public) \(path, privacy: .public) → HTTP \(http.statusCode)")
         }
 
         switch http.statusCode {
@@ -239,9 +236,47 @@ actor ProxmoxClient {
         case 403:
             throw ProxmoxError.forbidden(Self.errorMessage(from: data))
         case 595, 596, 599:
-            throw ProxmoxError.transport(Self.errorMessage(from: data) ?? "Le nœud est injoignable dans le cluster.")
+            throw ProxmoxError.transport(Self.errorMessage(from: data) ?? "The node is unreachable from the cluster.")
         default:
             throw ProxmoxError.httpStatus(http.statusCode, Self.errorMessage(from: data))
+        }
+    }
+
+    /// When our trust delegate cancels a TLS challenge, URLSession reports a
+    /// plain `cancelled` error. The delegate's recorded outcome is what tells a
+    /// certificate rejection apart from a genuine cancellation.
+    private func mapTransportError(_ error: Error) -> ProxmoxError {
+        switch trustDelegate.lastOutcome {
+        case .untrusted:
+            return .untrustedCertificate(host: profile.host, fingerprint: trustDelegate.lastSeenFingerprint)
+        case .pinMismatch:
+            return .certificateChanged(host: profile.host, fingerprint: trustDelegate.lastSeenFingerprint)
+        case .trusted, .none:
+            break
+        }
+
+        guard let urlError = error as? URLError else {
+            return .transport(error.localizedDescription)
+        }
+        switch urlError.code {
+        case .cancelled:
+            return .cancelled
+        case .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+            return .untrustedCertificate(host: profile.host, fingerprint: trustDelegate.lastSeenFingerprint)
+        case .cannotFindHost, .dnsLookupFailed:
+            return .transport("Couldn't find \(profile.host). Check the address.")
+        case .cannotConnectToHost:
+            return .transport("Couldn't connect to \(profile.host) on port \(profile.port).")
+        case .timedOut:
+            return .transport("The server didn't respond in time.")
+        case .notConnectedToInternet, .networkConnectionLost:
+            return .transport("You're offline.")
+        case .secureConnectionFailed:
+            return .transport("A secure connection to \(profile.host) couldn't be established.")
+        default:
+            Log.network.error("Transport error: \(urlError.localizedDescription, privacy: .public)")
+            return .transport(urlError.localizedDescription)
         }
     }
 
