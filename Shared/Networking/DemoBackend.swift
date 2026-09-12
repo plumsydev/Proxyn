@@ -81,19 +81,19 @@ final class DemoBackend {
         guests = [
             DemoGuest(vmid: 100, name: "opnsense", kind: "qemu", node: "pve-alpha", cores: 4,
                       maxmem: 4 * gb, maxdisk: 32 * gb, running: true, template: false,
-                      tags: ["reseau", "critique"], seed: 0.4,
+                      tags: ["network", "critical"], seed: 0.4,
                       startedAt: Date().addingTimeInterval(-1_840_000), osType: "l26", pool: "infra",
-                      snapshots: snaps([("avant-maj-24.7", "Avant montée de version", 259_200, false)])),
+                      snapshots: snaps([("pre-upgrade-24.7", "Before OPNsense 24.7 upgrade", 259_200, false)])),
             DemoGuest(vmid: 101, name: "truenas", kind: "qemu", node: "pve-alpha", cores: 6,
                       maxmem: 24 * gb, maxdisk: 64 * gb, running: true, template: false,
-                      tags: ["stockage"], seed: 1.2,
+                      tags: ["storage"], seed: 1.2,
                       startedAt: Date().addingTimeInterval(-1_820_000), osType: "l26", pool: "infra",
                       snapshots: []),
             DemoGuest(vmid: 102, name: "home-assistant", kind: "qemu", node: "pve-alpha", cores: 2,
                       maxmem: 4 * gb, maxdisk: 48 * gb, running: true, template: false,
-                      tags: ["domotique"], seed: 2.6,
-                      startedAt: Date().addingTimeInterval(-604_800), osType: "l26", pool: "maison",
-                      snapshots: snaps([("2025.6.3", "Version stable", 86_400, true),
+                      tags: ["home"], seed: 2.6,
+                      startedAt: Date().addingTimeInterval(-604_800), osType: "l26", pool: "home",
+                      snapshots: snaps([("2025.6.3", "Known good release", 86_400, true),
                                         ("2025.5.1", "", 1_900_000, false)])),
             DemoGuest(vmid: 103, name: "win11-lab", kind: "qemu", node: "pve-beta", cores: 8,
                       maxmem: 16 * gb, maxdisk: 256 * gb, running: false, template: false,
@@ -116,14 +116,14 @@ final class DemoBackend {
                       snapshots: []),
             DemoGuest(vmid: 110, name: "nginx-proxy", kind: "lxc", node: "pve-alpha", cores: 2,
                       maxmem: 1 * gb, maxdisk: 8 * gb, running: true, template: false,
-                      tags: ["web", "reseau"], seed: 4.1,
+                      tags: ["web", "network"], seed: 4.1,
                       startedAt: Date().addingTimeInterval(-1_800_000), osType: "debian", pool: "infra",
                       snapshots: []),
             DemoGuest(vmid: 111, name: "postgres", kind: "lxc", node: "pve-alpha", cores: 4,
                       maxmem: 8 * gb, maxdisk: 120 * gb, running: true, template: false,
-                      tags: ["base-de-donnees", "critique"], seed: 0.1,
+                      tags: ["database", "critical"], seed: 0.1,
                       startedAt: Date().addingTimeInterval(-1_790_000), osType: "debian", pool: "infra",
-                      snapshots: snaps([("pre-pg16", "Avant migration PostgreSQL 16", 432_000, false)])),
+                      snapshots: snaps([("pre-pg16", "Before PostgreSQL 16 upgrade", 432_000, false)])),
             DemoGuest(vmid: 112, name: "gitea", kind: "lxc", node: "pve-beta", cores: 2,
                       maxmem: 2 * gb, maxdisk: 40 * gb, running: true, template: false,
                       tags: ["dev"], seed: 2.9,
@@ -132,11 +132,11 @@ final class DemoBackend {
             DemoGuest(vmid: 113, name: "jellyfin", kind: "lxc", node: "pve-beta", cores: 6,
                       maxmem: 6 * gb, maxdisk: 32 * gb, running: true, template: false,
                       tags: ["media"], seed: 1.1,
-                      startedAt: Date().addingTimeInterval(-320_000), osType: "debian", pool: "maison",
+                      startedAt: Date().addingTimeInterval(-320_000), osType: "debian", pool: "home",
                       snapshots: []),
             DemoGuest(vmid: 114, name: "wireguard", kind: "lxc", node: "pve-edge", cores: 1,
                       maxmem: 512 * 1_048_576, maxdisk: 4 * gb, running: true, template: false,
-                      tags: ["reseau"], seed: 3.4,
+                      tags: ["network"], seed: 3.4,
                       startedAt: Date().addingTimeInterval(-1_700_000), osType: "debian", pool: "infra",
                       snapshots: []),
             DemoGuest(vmid: 115, name: "uptime-kuma", kind: "lxc", node: "pve-edge", cores: 1,
@@ -146,7 +146,7 @@ final class DemoBackend {
                       snapshots: []),
             DemoGuest(vmid: 120, name: "vaultwarden", kind: "lxc", node: "pve-alpha", cores: 1,
                       maxmem: 1 * gb, maxdisk: 8 * gb, running: false, template: false,
-                      tags: ["securite"], seed: 2.2,
+                      tags: ["security"], seed: 2.2,
                       startedAt: Date(), osType: "debian", pool: nil, snapshots: []),
             DemoGuest(vmid: 900, name: "debian-12-modele", kind: "qemu", node: "pve-alpha", cores: 2,
                       maxmem: 2 * gb, maxdisk: 16 * gb, running: false, template: true,
@@ -253,9 +253,9 @@ final class DemoBackend {
             "starttime": start, "endtime": start + duration
         ], at: 0)
         taskLogs[upid] = [
-            "INFO: démarrage de l'opération \(type) sur \(id.isEmpty ? node : id)",
-            "INFO: vérification des prérequis",
-            "INFO: opération appliquée",
+            "INFO: starting \(type) on \(id.isEmpty ? node : id)",
+            "INFO: checking prerequisites",
+            "INFO: applying changes",
             "TASK OK"
         ]
         return upid
@@ -283,9 +283,9 @@ final class DemoBackend {
         case "cluster":
             return cluster(parts: Array(parts.dropFirst()), query: query)
         case "pools":
-            return envelope([["poolid": "infra", "comment": "Services d'infrastructure"],
-                             ["poolid": "maison", "comment": "Domotique & média"],
-                             ["poolid": "cluster", "comment": "Nœuds Kubernetes"]])
+            return envelope([["poolid": "infra", "comment": "Core infrastructure"],
+                             ["poolid": "home", "comment": "Home automation and media"],
+                             ["poolid": "cluster", "comment": "Kubernetes nodes"]])
         case "nodes":
             return nodeRoute(parts: Array(parts.dropFirst()), query: query)
         case "access":
@@ -317,11 +317,11 @@ final class DemoBackend {
         case "backup":
             return envelope([[
                 "id": "backup-demo-01", "schedule": "sun 02:00", "storage": "pbs-offsite",
-                "enabled": 1, "comment": "Sauvegarde hebdomadaire complète", "mode": "snapshot",
+                "enabled": 1, "comment": "Weekly full backup", "mode": "snapshot",
                 "all": 1, "next": Date().addingTimeInterval(186_000).timeIntervalSince1970
             ], [
                 "id": "backup-demo-02", "schedule": "mon..fri 23:30", "storage": "nas-nfs",
-                "enabled": 1, "comment": "Services critiques", "mode": "snapshot",
+                "enabled": 1, "comment": "Critical services, nightly", "mode": "snapshot",
                 "vmid": "100,111,120", "all": 0,
                 "next": Date().addingTimeInterval(42_000).timeIntervalSince1970
             ]])
@@ -444,12 +444,12 @@ final class DemoBackend {
                 ["iface": "lo", "type": "loopback", "active": 1, "autostart": 1,
                  "address": "127.0.0.1", "cidr": "127.0.0.1/8"],
                 ["iface": "enp3s0", "type": "eth", "active": 1, "autostart": 1,
-                 "comments": "Lien 2,5 Gb/s"],
+                 "comments": "2.5 GbE uplink"],
                 ["iface": "vmbr0", "type": "bridge", "active": 1, "autostart": 1,
                  "cidr": "192.168.10.\(11 + (nodes.firstIndex { $0.name == nodeName } ?? 0))/24",
                  "gateway": "192.168.10.1", "bridge_ports": "enp3s0"],
                 ["iface": "vmbr1", "type": "bridge", "active": 1, "autostart": 1,
-                 "bridge_ports": "none", "comments": "Réseau isolé pour le lab"]
+                 "bridge_ports": "none", "comments": "Isolated lab network"]
             ])
 
         case "disks":
@@ -613,12 +613,12 @@ final class DemoBackend {
                 ["name": $0.name, "description": $0.description,
                  "snaptime": $0.time.timeIntervalSince1970, "vmstate": $0.vmstate ? 1 : 0]
             }
-            out.append(["name": "current", "description": "Vous êtes ici"])
+            out.append(["name": "current", "description": "You are here"])
             return envelope(out)
 
         case "firewall":
             if tail.count > 1, tail[1] == "options" {
-                return envelope(["enable": guest.tags.contains("reseau") ? 1 : 0,
+                return envelope(["enable": guest.tags.contains("network") ? 1 : 0,
                                  "policy_in": "DROP", "policy_out": "ACCEPT"])
             }
             return envelope([
@@ -626,7 +626,7 @@ final class DemoBackend {
                  "dport": "22", "source": "192.168.10.0/24", "comment": "SSH LAN"],
                 ["pos": 1, "type": "in", "action": "ACCEPT", "enable": 1, "proto": "tcp",
                  "dport": "443", "comment": "HTTPS"],
-                ["pos": 2, "type": "in", "action": "DROP", "enable": 1, "comment": "Tout le reste"]
+                ["pos": 2, "type": "in", "action": "DROP", "enable": 1, "comment": "Default deny"]
             ])
 
         case "agent":
@@ -656,8 +656,8 @@ final class DemoBackend {
             "name": guest.name,
             "cores": Int(guest.cores),
             "memory": Int(guest.maxmem / 1_048_576),
-            "onboot": guest.tags.contains("critique") ? 1 : 0,
-            "protection": guest.tags.contains("critique") ? 1 : 0,
+            "onboot": guest.tags.contains("critical") ? 1 : 0,
+            "protection": guest.tags.contains("critical") ? 1 : 0,
             "tags": guest.tags.joined(separator: ";"),
             "net0": "virtio=BC:24:11:\(String(format: "%02X", guest.vmid % 255)):A4:1F,bridge=vmbr0,firewall=1"
         ]
@@ -684,7 +684,7 @@ final class DemoBackend {
             config["swap"] = 512
         }
         if guest.vmid == 111 {
-            config["description"] = "Base PostgreSQL 16 principale.\nSauvegarde logique quotidienne vers nas-nfs à 01:00.\nNe pas redémarrer sans prévenir."
+            config["description"] = "Primary PostgreSQL 16 instance.\nLogical dump to nas-nfs every night at 01:00.\nAnnounce before restarting."
             config["mp0"] = "nas-nfs:subvol-111-disk-1,mp=/var/lib/postgresql,size=200G"
         }
         return config
@@ -903,7 +903,7 @@ final class DemoBackend {
 
         if parts[4] == "status" { return envelope(task) }
         if parts[4] == "log" {
-            let lines = taskLogs[upid] ?? ["INFO: aucune sortie disponible", "TASK OK"]
+            let lines = taskLogs[upid] ?? ["INFO: no output", "TASK OK"]
             return envelope(lines.enumerated().map { ["n": $0.offset + 1, "t": $0.element] })
         }
         return nil
