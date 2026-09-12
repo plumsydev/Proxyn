@@ -32,11 +32,21 @@ enum PVETimeframe: String, CaseIterable, Identifiable, Sendable {
 
     var label: String {
         switch self {
-        case .hour: return "1 H"
-        case .day: return "24 H"
-        case .week: return "7 J"
-        case .month: return "1 M"
-        case .year: return "1 A"
+        case .hour: return "1H"
+        case .day: return "1D"
+        case .week: return "1W"
+        case .month: return "1M"
+        case .year: return "1Y"
+        }
+    }
+
+    var accessibilityName: String {
+        switch self {
+        case .hour: return "Past hour"
+        case .day: return "Past day"
+        case .week: return "Past week"
+        case .month: return "Past month"
+        case .year: return "Past year"
         }
     }
 
@@ -83,7 +93,7 @@ enum MetricUnit: Sendable, Hashable {
         switch self {
         case .percent: return Format.percent(value)
         case .bytes: return Format.bytes(value)
-        case .bytesPerSecond: return Format.bytes(value) + "/s"
+        case .bytesPerSecond: return Format.rate(value)
         case .iops: return Format.compactNumber(value) + " IO/s"
         case .raw: return Format.compactNumber(value)
         }
