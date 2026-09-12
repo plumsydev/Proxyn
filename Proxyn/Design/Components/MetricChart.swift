@@ -1,144 +1,113 @@
 import SwiftUI
 import Charts
 
-/// The app's chart.
+/// Time-series chart.
 ///
-/// One protagonist series in the accent, the rest stepping down in saturation;
-/// horizontal grid only; no domain lines; a drag-to-scrub readout that snaps to
-/// the nearest sample and reports into the legend rather than into a floating
-/// bubble that covers the data.
+/// Selection uses Swift Charts' own `chartXSelection`, which cooperates with
+/// the enclosing scroll view — a custom drag gesture either steals vertical
+/// scrolling or misses horizontal scrubs.
 struct MetricChart: View {
     var series: [MetricSeries]
     var timeframe: PVETimeframe
-    var height: CGFloat = 150
-    var showsLegend: Bool = true
-    var stacked: Bool = false
+    var height: CGFloat = 160
     /// Pin the Y domain to 0…1 for percentages.
     var normalized: Bool = false
 
-    @State private var scrubDate: Date?
+    @State private var selectedDate: Date?
 
-    private var allPoints: [MetricPoint] { series.flatMap(\.points) }
+    private var hasData: Bool { series.contains { !$0.points.isEmpty } }
 
     private var yMax: Double {
         if normalized { return 1 }
-        let peak = allPoints.map(\.value).max() ?? 1
-        return peak <= 0 ? 1 : peak * 1.15
+        let peak = series.flatMap(\.points).map(\.value).max() ?? 0
+        return peak > 0 ? peak * 1.15 : 1
     }
 
-    private var scrubbed: [(MetricSeries, MetricPoint)] {
-        guard let scrubDate else { return [] }
-        return series.compactMap { s in
-            guard let nearest = s.points.min(by: {
-                abs($0.date.timeIntervalSince(scrubDate)) < abs($1.date.timeIntervalSince(scrubDate))
-            }) else { return nil }
-            return (s, nearest)
-        }
+    private func nearest(in s: MetricSeries, to date: Date) -> MetricPoint? {
+        s.points.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if showsLegend { legend }
+        VStack(alignment: .leading, spacing: 10) {
+            legend
 
-            if allPoints.isEmpty {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.white.opacity(0.025))
-                    Text("Aucune donnée RRD")
-                        .font(.caption)
-                        .foregroundStyle(Palette.inkTertiary)
+            if hasData {
+                chart
+            } else {
+                ContentUnavailableView {
+                    Label("No Data", systemImage: "chart.xyaxis.line")
+                } description: {
+                    Text("Proxmox hasn't recorded metrics for this range yet.")
                 }
                 .frame(height: height)
-            } else {
-                chart
             }
         }
     }
 
     private var legend: some View {
-        HStack(spacing: 16) {
-            ForEach(series) { s in
-                let scrubValue = scrubbed.first(where: { $0.0.id == s.id })?.1.value
-                HStack(spacing: 6) {
-                    Capsule()
-                        .fill(Palette.token(s.colorToken))
-                        .frame(width: 10, height: 2)
-                    Text(s.label)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.inkTertiary)
-                    Text(s.unit.format(scrubValue ?? s.latest))
-                        .font(.metric(12.5))
-                        .foregroundStyle(Palette.ink)
-                        .contentTransition(.numericText())
-                }
-            }
-            Spacer(minLength: 0)
-            Text(scrubDate.map(Format.clock) ?? " ")
-                .font(.metric(12))
-                .foregroundStyle(Palette.ember)
-                .opacity(scrubDate == nil ? 0 : 1)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) { legendItems }
+            VStack(alignment: .leading, spacing: 4) { legendItems }
         }
-        .animation(Motion.fade, value: scrubDate)
+        .font(.subheadline)
+    }
+
+    @ViewBuilder
+    private var legendItems: some View {
+        ForEach(series) { s in
+            let value = selectedDate.flatMap { nearest(in: s, to: $0)?.value } ?? s.latest
+            HStack(spacing: 6) {
+                Circle().fill(Palette.series(s.colorToken)).frame(width: 7, height: 7)
+                Text(s.label).foregroundStyle(.secondary)
+                Text(s.unit.format(value))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+            }
+            .lineLimit(1)
+        }
+        if let selectedDate {
+            Text(Format.clock(selectedDate))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var chart: some View {
         Chart {
             ForEach(Array(series.enumerated()), id: \.element.id) { index, s in
-                // Only the lead series gets a fill; two overlapping washes read
-                // as mud.
-                if index == 0 {
-                    ForEach(s.points) { point in
-                        AreaMark(
-                            x: .value("Heure", point.date),
-                            y: .value(s.label, point.value),
-                            series: .value("Série", s.id),
-                            stacking: stacked ? .standard : .unstacked
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [Palette.token(s.colorToken).opacity(0.16),
-                                         Palette.token(s.colorToken).opacity(0.0)],
-                                startPoint: .top, endPoint: .bottom))
-                        .interpolationMethod(.monotone)
-                        .accessibilityHidden(true)
-                    }
-                }
-
                 ForEach(s.points) { point in
-                    LineMark(
-                        x: .value("Heure", point.date),
-                        y: .value(s.label, point.value),
-                        series: .value("Série", s.id)
-                    )
-                    .foregroundStyle(Palette.token(s.colorToken))
-                    .lineStyle(StrokeStyle(lineWidth: index == 0 ? 1.8 : 1.3,
-                                           lineCap: .round, lineJoin: .round))
+                    if index == 0 {
+                        AreaMark(x: .value("Time", point.date),
+                                 y: .value(s.label, point.value),
+                                 series: .value("Series", s.id))
+                        .foregroundStyle(LinearGradient(
+                            colors: [Palette.series(s.colorToken).opacity(0.2),
+                                     Palette.series(s.colorToken).opacity(0)],
+                            startPoint: .top, endPoint: .bottom))
+                        .interpolationMethod(.monotone)
+                    }
+                    LineMark(x: .value("Time", point.date),
+                             y: .value(s.label, point.value),
+                             series: .value("Series", s.id))
+                    .foregroundStyle(Palette.series(s.colorToken))
+                    .lineStyle(StrokeStyle(lineWidth: index == 0 ? 2 : 1.5, lineCap: .round))
                     .interpolationMethod(.monotone)
                 }
-                .accessibilityLabel(s.label)
             }
 
-            if let scrubDate {
-                RuleMark(x: .value("Curseur", scrubDate))
-                    .foregroundStyle(Palette.ink.opacity(0.22))
-                    .lineStyle(StrokeStyle(lineWidth: 1))
-                ForEach(Array(scrubbed.enumerated()), id: \.offset) { _, pair in
-                    PointMark(x: .value("Heure", pair.1.date),
-                              y: .value(pair.0.label, pair.1.value))
-                    .foregroundStyle(Palette.token(pair.0.colorToken))
-                    .symbolSize(34)
-                }
+            if let selectedDate {
+                RuleMark(x: .value("Selected", selectedDate))
+                    .foregroundStyle(Color(uiColor: .separator))
             }
         }
+        .chartXSelection(value: $selectedDate)
         .chartYScale(domain: 0...yMax)
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
-                AxisGridLine().foregroundStyle(Color.white.opacity(0.045))
+                AxisGridLine()
                 AxisValueLabel {
                     if let v = value.as(Double.self), let unit = series.first?.unit {
                         Text(unit.format(v))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(Palette.inkTertiary)
                     }
                 }
             }
@@ -147,69 +116,31 @@ struct MetricChart: View {
             AxisMarks(values: .automatic(desiredCount: 4)) { value in
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
-                        Text(xLabel(date))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(Palette.inkTertiary)
+                        Text(Self.axisLabel(date, timeframe: timeframe))
                     }
                 }
             }
         }
-        .chartOverlay { proxy in
-            GeometryReader { geo in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    // Simultaneous and horizontal-only: an exclusive gesture
-                    // would swallow the enclosing ScrollView's vertical pan.
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 10)
-                            .onChanged { drag in
-                                guard abs(drag.translation.width) > abs(drag.translation.height) * 1.2
-                                else { return }
-                                guard let plotFrame = proxy.plotFrame else { return }
-                                let origin = geo[plotFrame].origin
-                                let x = drag.location.x - origin.x
-                                if let date: Date = proxy.value(atX: x) {
-                                    if scrubDate == nil { Haptics.tap() }
-                                    scrubDate = date
-                                }
-                            }
-                            .onEnded { _ in
-                                withAnimation(Motion.fade) { scrubDate = nil }
-                            }
-                    )
-            }
-        }
         .frame(height: height)
-        .animation(Motion.glide, value: series.map(\.latest))
+        .sensoryFeedback(.selection, trigger: selectedDate == nil)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(series.map(\.label).joined(separator: " and "))
+        .accessibilityValue(series.map { "\($0.label) \($0.unit.format($0.latest))" }
+            .joined(separator: ", "))
     }
 
-    private func xLabel(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "fr_FR")
+    // Formatters are expensive; axis labels are rendered on every frame.
+    private static let hourFormat = Date.FormatStyle.dateTime.hour().minute().locale(AppLocale.current)
+    private static let dayFormat = Date.FormatStyle.dateTime.weekday(.abbreviated).locale(AppLocale.current)
+    private static let dateFormat = Date.FormatStyle.dateTime.month(.abbreviated).day().locale(AppLocale.current)
+    private static let monthFormat = Date.FormatStyle.dateTime.month(.abbreviated).locale(AppLocale.current)
+
+    static func axisLabel(_ date: Date, timeframe: PVETimeframe) -> String {
         switch timeframe {
-        case .hour, .day: f.dateFormat = "HH:mm"
-        case .week: f.dateFormat = "E"
-        case .month: f.dateFormat = "d MMM"
-        case .year: f.dateFormat = "MMM"
-        }
-        return f.string(from: date)
-    }
-}
-
-/// Chart in a card, with its title.
-struct ChartCard: View {
-    var title: String
-    var series: [MetricSeries]
-    var timeframe: PVETimeframe
-    var normalized: Bool = false
-    var height: CGFloat = 148
-
-    var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
-                SectionLabel(title)
-                MetricChart(series: series, timeframe: timeframe, height: height,
-                            normalized: normalized)
-            }
+        case .hour, .day: return date.formatted(hourFormat)
+        case .week: return date.formatted(dayFormat)
+        case .month: return date.formatted(dateFormat)
+        case .year: return date.formatted(monthFormat)
         }
     }
 }
