@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Content browser for one storage: ISOs, templates, disk images and backups,
-/// with delete / protect / restore actions and an URL downloader.
+/// Browses one storage's volumes, grouped by content type, with search,
+/// deletion, protection and download-from-URL.
 struct StorageDetailView: View {
     @Environment(AppModel.self) private var app
     let node: String
@@ -15,80 +15,132 @@ struct StorageDetailView: View {
     @State private var showDownload = false
     @State private var pendingDelete: PVEStorageContent?
 
-    enum ContentFilter: String, CaseIterable, Identifiable, Hashable {
-        case all, backup, images, iso, vztmpl
+    enum ContentFilter: String, CaseIterable, Identifiable {
+        case all, backup, iso, vztmpl, images, rootdir, snippets
         var id: String { rawValue }
+
         var title: String {
             switch self {
-            case .all: return "Tout"
+            case .all: return "All Content"
             case .backup: return "Backups"
-            case .images: return "Disques"
-            case .iso: return "ISO"
-            case .vztmpl: return "Modèles"
+            case .iso: return "ISO Images"
+            case .vztmpl: return "Container Templates"
+            case .images: return "VM Disks"
+            case .rootdir: return "Container Volumes"
+            case .snippets: return "Snippets"
             }
         }
-        var apiValue: String? { self == .all ? nil : rawValue }
+
+        var symbol: String {
+            switch self {
+            case .all: return "tray.full"
+            case .backup: return "externaldrive.badge.timemachine"
+            case .iso: return "opticaldisc"
+            case .vztmpl: return "shippingbox"
+            case .images: return "internaldrive"
+            case .rootdir: return "folder"
+            case .snippets: return "doc.text"
+            }
+        }
     }
 
     private var resource: PVEResource? {
         app.snapshot.storages.first { $0.storage == storage && ($0.node == node || $0.shared) }
     }
 
-    private var filtered: [PVEStorageContent] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        var list = items
-        if filter != .all { list = list.filter { $0.content == filter.rawValue } }
-        if !q.isEmpty {
-            list = list.filter {
-                $0.volid.lowercased().contains(q) || String($0.vmid ?? 0).contains(q)
-            }
+    private var guestNames: [Int: String] {
+        Dictionary(app.snapshot.guests.compactMap { g in g.vmid.map { ($0, g.displayName) } },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    private var visibleItems: [PVEStorageContent] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return items
+            .filter { filter == .all || $0.content == filter.rawValue }
+            .filter { q.isEmpty || $0.volid.localizedCaseInsensitiveContains(q) || String($0.vmid ?? -1) == q }
+            .sorted { ($0.ctime ?? 0) > ($1.ctime ?? 0) }
+    }
+
+    /// Only content types actually present, in a stable order.
+    private var groups: [(ContentFilter, [PVEStorageContent])] {
+        let grouped = Dictionary(grouping: visibleItems) { ContentFilter(rawValue: $0.content ?? "") ?? .all }
+        return ContentFilter.allCases.compactMap { kind in
+            guard let items = grouped[kind], !items.isEmpty else { return nil }
+            return (kind, items)
         }
-        return list.sorted { ($0.ctime ?? 0) > ($1.ctime ?? 0) }
+    }
+
+    private var availableFilters: [ContentFilter] {
+        let present = Set(items.compactMap { ContentFilter(rawValue: $0.content ?? "") })
+        return [.all] + ContentFilter.allCases.filter { $0 != .all && present.contains($0) }
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if let resource { headerCard(resource) }
+        List {
+            if let resource {
+                Section {
+                    UsageRow(title: "Used",
+                             value: Format.bytes(resource.disk),
+                             detail: "of \(Format.bytes(resource.maxdisk))",
+                             fraction: resource.diskFraction)
+                        .padding(.vertical, 4)
+                    LabeledContent("Type", value: resource.pluginType?.uppercased() ?? "—")
+                    LabeledContent("Node", value: resource.shared ? "Shared" : node)
+                    LabeledContent("Free", value: Format.bytes((resource.maxdisk ?? 0) - (resource.disk ?? 0)))
+                }
+            }
 
-                SearchField(text: $query, placeholder: "Nom de volume, ID…")
-                SegmentedRail(items: ContentFilter.allCases, label: \.title, selection: $filter)
+            if let error {
+                Section {
+                    InlineErrorRow(message: error) { Task { await load() } }
+                }
+            }
 
-                if let error { ErrorBanner(message: error, retry: { Task { await load() } }) }
-
-                if loading && items.isEmpty {
-                    VStack(spacing: 12) {
-                        ForEach(0..<4, id: \.self) { _ in SkeletonBlock(height: 64) }
-                    }
-                } else if filtered.isEmpty {
-                    EmptyStateView(symbol: "tray", title: "Rien ici",
-                                   message: "Aucun volume ne correspond à ce filtre sur \(storage).")
+            if loading && items.isEmpty {
+                Section { HStack { Spacer(); ProgressView(); Spacer() } }
+            } else if visibleItems.isEmpty {
+                if !query.isEmpty {
+                    ContentUnavailableView.search(text: query)
                 } else {
-                    GlassCard(padding: 12) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(filtered.enumerated()), id: \.element.id) { index, item in
-                                contentRow(item)
-                                if index < filtered.count - 1 { Divider1px().padding(.leading, 44) }
-                            }
+                    ContentUnavailableView("Empty", systemImage: filter.symbol,
+                                           description: Text("No \(filter == .all ? "content" : filter.title.lowercased()) on \(storage)."))
+                }
+            } else {
+                ForEach(groups, id: \.0) { kind, volumes in
+                    Section {
+                        ForEach(volumes) { volume in
+                            VolumeRow(volume: volume, symbol: kind.symbol,
+                                      guestName: volume.vmid.flatMap { guestNames[$0] })
+                                .swipeActions(edge: .trailing) {
+                                    Button("Delete", systemImage: "trash") { pendingDelete = volume }
+                                        .tint(Palette.critical)
+                                }
+                                .contextMenu { contextMenu(for: volume) }
                         }
+                    } header: {
+                        Text(kind.title)
+                    } footer: {
+                        Text("\(volumes.count) item\(volumes.count == 1 ? "" : "s") · \(Format.bytes(volumes.reduce(0) { $0 + ($1.size ?? 0) }))")
                     }
                 }
             }
-            .padding(.horizontal, Metrics.gutter)
-            .padding(.bottom, 92)
-            .animation(Motion.snap, value: filter)
         }
-        .scrollIndicators(.hidden)
-        .background(AuroraBackground(tint: Palette.sky, intensity: 0.45).ignoresSafeArea())
+        .proxynList()
         .navigationTitle(storage)
         .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "File name or guest ID")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { showDownload = true } label: {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Palette.ember)
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu {
+                    Picker("Content", selection: $filter) {
+                        ForEach(availableFilters) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    }
+                } label: {
+                    Label("Filter", systemImage: filter == .all
+                          ? "line.3.horizontal.decrease.circle"
+                          : "line.3.horizontal.decrease.circle.fill")
                 }
+                Button("Download from URL", systemImage: "arrow.down.circle") { showDownload = true }
             }
         }
         .refreshable { await load() }
@@ -96,142 +148,45 @@ struct StorageDetailView: View {
         .sheet(isPresented: $showDownload) {
             DownloadURLSheet(node: node, storage: storage) { await load() }
         }
-        .alert("Supprimer ce volume ?", isPresented: Binding(
-            get: { pendingDelete != nil },
-            set: { if !$0 { pendingDelete = nil } }),
-               presenting: pendingDelete) { item in
-            Button("Supprimer", role: .destructive) {
+        .confirmationDialog("Delete this file?",
+                            isPresented: Binding(get: { pendingDelete != nil },
+                                                 set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible,
+                            presenting: pendingDelete) { volume in
+            Button("Delete", role: .destructive) { delete(volume) }
+        } message: { volume in
+            Text("\(volume.filename) (\(Format.bytes(volume.size))) will be removed permanently.")
+        }
+    }
+
+    @ViewBuilder
+    private func contextMenu(for volume: PVEStorageContent) -> some View {
+        if volume.content == "backup" {
+            Button(volume.isProtected ? "Remove Protection" : "Protect",
+                   systemImage: volume.isProtected ? "lock.open" : "lock") {
                 Task {
-                    await app.perform("Suppression de \(item.filename)", node: node) { api in
-                        try await api.deleteVolume(node: node, volid: item.volid)
+                    await app.perform(volume.isProtected ? "Remove protection" : "Protect backup",
+                                      node: node) { api in
+                        try await api.setVolumeProtection(node: node, volid: volume.volid,
+                                                          isProtected: !volume.isProtected)
                     }
                     await load()
                 }
             }
-            Button("Annuler", role: .cancel) {}
-        } message: { item in
-            Text("\(item.filename) (\(Format.bytes(item.size))) sera définitivement effacé du stockage.")
         }
+        Button("Copy Volume ID", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = volume.volid
+        }
+        Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = volume }
     }
 
-    private func headerCard(_ resource: PVEResource) -> some View {
-        GlassCard(padding: 18) {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Occupé")
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(Palette.inkTertiary)
-                    MetricText(value: Format.bytesParts(resource.disk).value,
-                               unit: Format.bytesParts(resource.disk).unit,
-                               size: 36, weight: .medium)
-                }
-
-                MeterBar(fraction: resource.diskFraction, height: 4)
-
-                Divider1px()
-
-                HStack(spacing: 0) {
-                    HeroStat(value: Format.percent(resource.diskFraction), label: "occupé",
-                             tint: Palette.load(resource.diskFraction) == Palette.rose
-                                   ? Palette.rose : Palette.ink)
-                    HeroStat(value: Format.bytes((resource.maxdisk ?? 0) - (resource.disk ?? 0)),
-                             label: "libre", tint: Palette.mint)
-                    HeroStat(value: "\(items.count)", label: "volumes", tint: Palette.inkSecondary)
-                    HeroStat(value: resource.pluginType ?? "—", label: "type",
-                             tint: Palette.inkSecondary)
-                }
+    private func delete(_ volume: PVEStorageContent) {
+        Task {
+            await app.perform("Delete \(volume.filename)", node: node) { api in
+                try await api.deleteVolume(node: node, volid: volume.volid)
             }
+            await load()
         }
-    }
-
-    private func contentRow(_ item: PVEStorageContent) -> some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: symbol(for: item))
-                .font(.system(size: 13))
-                .foregroundStyle(tint(for: item))
-                .frame(width: 16)
-                .padding(.top, 3)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.filename)
-                    .font(.system(size: 14))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                HStack(spacing: 6) {
-                    Text(Format.bytes(item.size))
-                        .font(.metric(12))
-                        .foregroundStyle(Palette.inkTertiary)
-                    if let vmid = item.vmid, vmid > 0 {
-                        Text("· \(vmid)")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Palette.inkTertiary)
-                    }
-                    if let date = item.date {
-                        Text("· \(Format.ago(date))")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Palette.inkTertiary)
-                    }
-                    if item.isProtected {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 8.5))
-                            .foregroundStyle(Palette.amber)
-                    }
-                }
-                .lineLimit(1)
-            }
-            Spacer(minLength: 4)
-
-            Menu {
-                if item.content == "backup" {
-                    Button {
-                        Task {
-                            await app.perform(item.isProtected ? "Protection retirée" : "Sauvegarde protégée",
-                                              node: node) { api in
-                                try await api.setVolumeProtection(node: node, volid: item.volid,
-                                                                  isProtected: !item.isProtected)
-                            }
-                            await load()
-                        }
-                    } label: {
-                        Label(item.isProtected ? "Retirer la protection" : "Protéger",
-                              systemImage: item.isProtected ? "lock.open" : "lock")
-                    }
-                }
-                Button {
-                    UIPasteboard.general.string = item.volid
-                    Haptics.success()
-                    app.toast(.info, "Volume copié", detail: item.volid)
-                } label: { Label("Copier le volid", systemImage: "doc.on.clipboard") }
-
-                Button(role: .destructive) { pendingDelete = item } label: {
-                    Label("Supprimer", systemImage: "trash")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Palette.inkTertiary)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-        }
-        .padding(.vertical, 9)
-    }
-
-    private func symbol(for item: PVEStorageContent) -> String {
-        switch item.content {
-        case "backup": return "externaldrive.fill.badge.timemachine"
-        case "iso": return "opticaldisc.fill"
-        case "vztmpl": return "shippingbox.fill"
-        case "images", "rootdir": return "internaldrive.fill"
-        case "snippets": return "doc.text.fill"
-        default: return "doc.fill"
-        }
-    }
-
-    private func tint(for item: PVEStorageContent) -> Color {
-        item.content == "backup" ? Palette.inkSecondary : Palette.inkTertiary
     }
 
     private func load() async {
@@ -241,17 +196,73 @@ struct StorageDetailView: View {
         do {
             items = try await api.storageContent(node: node, storage: storage)
             error = nil
-        } catch let err as ProxmoxError {
-            if case .cancelled = err { return }
-            error = err.localizedDescription
+            if !availableFilters.contains(filter) { filter = .all }
+        } catch let failure as ProxmoxError {
+            if case .cancelled = failure { return }
+            error = failure.localizedDescription
         } catch {
             self.error = error.localizedDescription
         }
     }
 }
 
-/// Pulls an ISO or LXC template straight onto the storage from a URL — the one
-/// upload path that works without shipping the file from the phone.
+/// A file name can be very long (vzdump names are ~50 characters): it gets the
+/// full row width and truncates in the middle, keeping the distinctive date and
+/// extension visible. Metadata sits on its own line underneath.
+private struct VolumeRow: View {
+    var volume: PVEStorageContent
+    var symbol: String
+    var guestName: String?
+
+    /// Backups and guest disks are titled by the guest they belong to; the
+    /// generated file name goes underneath, where its length can't crowd out
+    /// the information that tells rows apart.
+    private var title: String {
+        guard let vmid = volume.vmid, vmid > 0,
+              volume.content == "backup" || volume.content == "images" || volume.content == "rootdir"
+        else { return volume.filename }
+        return guestName.map { "\($0) (\(vmid))" } ?? "Guest \(vmid)"
+    }
+
+    private var metadata: String {
+        var parts = [Format.bytes(volume.size)]
+        if let date = volume.date { parts.append(Format.dateTime(date)) }
+        if title != volume.filename, volume.content != "backup" { parts.append(volume.filename) }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if volume.isProtected {
+                        Image(systemName: "lock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Protected")
+                    }
+                }
+                Text(metadata)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.vertical, 1)
+    }
+}
+
+/// Makes the node download an ISO or container template directly — nothing
+/// passes through the phone.
 struct DownloadURLSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -262,50 +273,66 @@ struct DownloadURLSheet: View {
     @State private var url = ""
     @State private var filename = ""
     @State private var content = "iso"
-    @State private var busy = false
+    @State private var working = false
 
-    private let contents = [StringOption("iso", "Image ISO"), StringOption("vztmpl", "Modèle LXC")]
+    private var isValidURL: Bool {
+        guard let parsed = URL(string: url), let scheme = parsed.scheme?.lowercased() else { return false }
+        return ["http", "https"].contains(scheme) && parsed.host != nil
+    }
 
     var body: some View {
-        SheetScaffold(
-            title: "Télécharger",
-            subtitle: "Proxmox téléchargera le fichier directement depuis l'URL vers \(storage) — rien ne transite par votre iPhone.",
-            confirmLabel: "Télécharger",
-            confirmEnabled: !url.isEmpty && !filename.isEmpty,
-            busy: busy,
-            onConfirm: start
-        ) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    ProxynField(label: "URL", placeholder: "https://…/debian.iso", text: $url,
-                                symbol: "link", keyboard: .URL, monospaced: true)
-                    ProxynField(label: "Nom de fichier", placeholder: "debian-12.iso", text: $filename,
-                                symbol: "doc.fill", monospaced: true)
-                    PickerRow(title: "Type", symbol: "square.stack.3d.up.fill", options: contents,
-                              label: \.title,
-                              selection: Binding(
-                                get: { contents.first { $0.value == content } ?? contents[0] },
-                                set: { content = $0.value }))
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("https://example.com/image.iso", text: $url)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("File name", text: $filename)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Picker("Type", selection: $content) {
+                        Text("ISO Image").tag("iso")
+                        Text("Container Template").tag("vztmpl")
+                    }
+                } footer: {
+                    Text("\(node) downloads the file straight into \(storage).")
                 }
             }
-        }
-        .onChange(of: url) { _, value in
-            if filename.isEmpty, let last = value.split(separator: "/").last, last.contains(".") {
-                filename = String(last)
+            .navigationTitle("Download from URL")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if working {
+                        ProgressView()
+                    } else {
+                        Button("Download", action: submit)
+                            .fontWeight(.semibold)
+                            .disabled(!isValidURL || filename.isEmpty)
+                    }
+                }
+            }
+            .onChange(of: url) { _, value in
+                if filename.isEmpty, let last = URL(string: value)?.lastPathComponent, last.contains(".") {
+                    filename = last
+                }
             }
         }
     }
 
-    private func start() {
-        busy = true
+    private func submit() {
+        working = true
         Task {
-            await app.perform("Téléchargement de \(filename)", node: node) { api in
+            let ok = await app.perform("Download \(filename)", node: node) { api in
                 try await api.downloadToStorage(node: node, storage: storage, url: url,
                                                 content: content, filename: filename)
             }
             await onDone()
-            busy = false
-            dismiss()
+            working = false
+            if ok { dismiss() }
         }
     }
 }
