@@ -3,78 +3,101 @@ import Foundation
 enum AppGroup {
     static let identifier = "group.com.proxyn.app"
 
-    /// Falls back to `.standard` when the app-group entitlement isn't provisioned,
-    /// so the app still works on a bare development signing profile.
+    /// Falls back to `.standard` when the app-group entitlement isn't
+    /// provisioned, so the app still works on a bare development profile.
     static var defaults: UserDefaults {
         UserDefaults(suiteName: identifier) ?? .standard
     }
 }
 
 enum PVEAuthMethod: String, Codable, Sendable, CaseIterable, Identifiable {
-    case ticket      // username + password (+ optional TOTP), full API surface
-    case apiToken    // PVEAPIToken, no console, no TOTP prompt
+    case ticket
+    case apiToken
+
     var id: String { rawValue }
 
-    var title: String { self == .ticket ? "Identifiants" : "Jeton d'API" }
-    var subtitle: String {
-        self == .ticket
-        ? "Accès complet : console, terminal, toutes les actions."
-        : "Recommandé pour un accès restreint. La console web reste indisponible."
+    var title: String { self == .ticket ? "Password" : "API Token" }
+
+    var explanation: String {
+        switch self {
+        case .ticket:
+            return "Full access, including the web console. Supports two-factor authentication."
+        case .apiToken:
+            return "Scoped access you can revoke at any time. The web console isn't available with tokens."
+        }
     }
-    var symbol: String { self == .ticket ? "person.badge.key.fill" : "key.horizontal.fill" }
 }
 
-/// A saved Proxmox endpoint. Secrets live in the Keychain keyed by `secretKey`.
+/// A saved Proxmox endpoint. The secret itself lives in the Keychain.
+///
+/// Decoding is tolerant: every field has a default, so adding a property in a
+/// later version never makes an existing install lose its servers.
 struct ServerProfile: Identifiable, Codable, Hashable, Sendable {
-    var id: UUID
-    var name: String
-    var host: String
-    var port: Int
-    var useHTTPS: Bool
-    var authMethod: PVEAuthMethod
-    var username: String
-    var realm: String
-    var tokenID: String
-    var allowInsecureTLS: Bool
+    var id: UUID = UUID()
+    var name: String = ""
+    var host: String = ""
+    var port: Int = 8006
+    var useHTTPS: Bool = true
+    var authMethod: PVEAuthMethod = .ticket
+    var username: String = "root"
+    var realm: String = "pam"
+    var tokenID: String = ""
+    /// Accept any certificate. Off by default; pinning is the recommended path.
+    var skipCertificateVerification: Bool = false
     var pinnedCertificateSHA256: String?
-    var accentHex: String
-    var createdAt: Date
+    var createdAt: Date = Date()
     var lastConnectedAt: Date?
-    var defaultNode: String?
-    var pollIntervalSeconds: Double
 
     init(id: UUID = UUID(), name: String = "", host: String = "", port: Int = 8006,
          useHTTPS: Bool = true, authMethod: PVEAuthMethod = .ticket, username: String = "root",
-         realm: String = "pam", tokenID: String = "", allowInsecureTLS: Bool = true,
-         pinnedCertificateSHA256: String? = nil, accentHex: String = "FF7A2F",
-         createdAt: Date = Date(), lastConnectedAt: Date? = nil, defaultNode: String? = nil,
-         pollIntervalSeconds: Double = 5) {
+         realm: String = "pam", tokenID: String = "", skipCertificateVerification: Bool = false,
+         pinnedCertificateSHA256: String? = nil, createdAt: Date = Date(),
+         lastConnectedAt: Date? = nil) {
         self.id = id; self.name = name; self.host = host; self.port = port
         self.useHTTPS = useHTTPS; self.authMethod = authMethod; self.username = username
-        self.realm = realm; self.tokenID = tokenID; self.allowInsecureTLS = allowInsecureTLS
-        self.pinnedCertificateSHA256 = pinnedCertificateSHA256; self.accentHex = accentHex
+        self.realm = realm; self.tokenID = tokenID
+        self.skipCertificateVerification = skipCertificateVerification
+        self.pinnedCertificateSHA256 = pinnedCertificateSHA256
         self.createdAt = createdAt; self.lastConnectedAt = lastConnectedAt
-        self.defaultNode = defaultNode; self.pollIntervalSeconds = pollIntervalSeconds
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, host, port, useHTTPS, authMethod, username, realm, tokenID
+        case skipCertificateVerification, pinnedCertificateSHA256, createdAt, lastConnectedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = ServerProfile()
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? fallback.id
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 8006
+        useHTTPS = try c.decodeIfPresent(Bool.self, forKey: .useHTTPS) ?? true
+        authMethod = try c.decodeIfPresent(PVEAuthMethod.self, forKey: .authMethod) ?? .ticket
+        username = try c.decodeIfPresent(String.self, forKey: .username) ?? "root"
+        realm = try c.decodeIfPresent(String.self, forKey: .realm) ?? "pam"
+        tokenID = try c.decodeIfPresent(String.self, forKey: .tokenID) ?? ""
+        skipCertificateVerification = try c.decodeIfPresent(Bool.self, forKey: .skipCertificateVerification) ?? false
+        pinnedCertificateSHA256 = try c.decodeIfPresent(String.self, forKey: .pinnedCertificateSHA256)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        lastConnectedAt = try c.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
     }
 
     var displayName: String { name.isEmpty ? host : name }
+    var fullUsername: String { "\(username)@\(realm)" }
+    /// `root@pam!mytoken`
+    var tokenIdentifier: String { "\(fullUsername)!\(tokenID)" }
 
     /// The built-in demo cluster is served by `DemoBackend` instead of the
-    /// network, so every screen can be explored without a real server.
+    /// network, so every screen can be explored without a real server — which
+    /// is also what App Review uses.
     var isDemo: Bool { host == DemoBackend.host }
 
     static func demo() -> ServerProfile {
-        var profile = ServerProfile(name: "homelab (démo)", host: DemoBackend.host, port: 8006,
-                                    authMethod: .apiToken, username: "demo", realm: "pve",
-                                    tokenID: "proxyn")
-        profile.pollIntervalSeconds = 3
-        return profile
+        ServerProfile(name: "Demo Cluster", host: DemoBackend.host, port: 8006,
+                      authMethod: .apiToken, username: "demo", realm: "pve", tokenID: "proxyn")
     }
-
-    var fullUsername: String { "\(username)@\(realm)" }
-
-    /// `root@pam!mytoken`
-    var tokenIdentifier: String { "\(fullUsername)!\(tokenID)" }
 
     var baseURL: URL? {
         var c = URLComponents()
@@ -86,8 +109,17 @@ struct ServerProfile: Identifiable, Codable, Hashable, Sendable {
 
     var apiURL: URL? { baseURL?.appendingPathComponent("api2/json") }
 
+    var addressLine: String {
+        "\(useHTTPS ? "https" : "http")://\(host):\(port)"
+    }
+
+    var identityLine: String {
+        authMethod == .ticket ? fullUsername : tokenIdentifier
+    }
+
+    // MARK: Secret
+
     var secretKey: String { "secret.\(id.uuidString)" }
-    var totpKey: String { "totp.\(id.uuidString)" }
 
     var secret: String? {
         get { Keychain.get(secretKey) }
@@ -96,25 +128,47 @@ struct ServerProfile: Identifiable, Codable, Hashable, Sendable {
             else { Keychain.remove(secretKey) }
         }
     }
+}
 
-    var subtitleLine: String {
-        let scheme = useHTTPS ? "https" : "http"
-        return "\(scheme)://\(host):\(port) · \(authMethod == .ticket ? fullUsername : tokenIdentifier)"
+enum AppearancePreference: String, Codable, Sendable, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
     }
 }
 
-/// Everything the app persists outside of the Keychain.
+/// Everything persisted outside the Keychain. Tolerant decoding, as above.
 struct AppSettings: Codable, Sendable, Hashable {
     var servers: [ServerProfile] = []
     var selectedServerID: UUID?
     var hapticsEnabled: Bool = true
-    var reduceMotion: Bool = false
-    var showTemplates: Bool = false
-    var defaultTimeframe: String = PVETimeframe.hour.rawValue
     var confirmDestructiveActions: Bool = true
+    var showTemplates: Bool = false
     var favoriteGuestIDs: [String] = []
-    var liveRefreshInterval: Double = 5
-    var backgroundRefreshEnabled: Bool = true
-    var compactGuestRows: Bool = false
-    var chartStyle: String = "area"
+    var refreshInterval: Double = 5
+    var appearance: AppearancePreference = .system
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case servers, selectedServerID, hapticsEnabled, confirmDestructiveActions
+        case showTemplates, favoriteGuestIDs, refreshInterval, appearance
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        servers = (try? c.decodeIfPresent([ServerProfile].self, forKey: .servers)) ?? []
+        selectedServerID = try? c.decodeIfPresent(UUID.self, forKey: .selectedServerID)
+        hapticsEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hapticsEnabled)) ?? true
+        confirmDestructiveActions = (try? c.decodeIfPresent(Bool.self, forKey: .confirmDestructiveActions)) ?? true
+        showTemplates = (try? c.decodeIfPresent(Bool.self, forKey: .showTemplates)) ?? false
+        favoriteGuestIDs = (try? c.decodeIfPresent([String].self, forKey: .favoriteGuestIDs)) ?? []
+        refreshInterval = (try? c.decodeIfPresent(Double.self, forKey: .refreshInterval)) ?? 5
+        appearance = (try? c.decodeIfPresent(AppearancePreference.self, forKey: .appearance)) ?? .system
+    }
 }
