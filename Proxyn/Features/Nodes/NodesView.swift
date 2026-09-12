@@ -4,97 +4,99 @@ struct NodesView: View {
     @Environment(AppModel.self) private var model
     @State private var path = NavigationPath()
 
+    private var snapshot: ClusterSnapshot { model.snapshot }
+
     var body: some View {
         NavigationStack(path: $path) {
-            ScreenScaffold(
-                title: "Nœuds",
-                eyebrow: "\(model.snapshot.onlineNodes.count) en ligne sur \(model.snapshot.nodes.count)",
-                statusColor: model.snapshot.offlineNodes.isEmpty ? Palette.mint : Palette.rose,
-                statusPulsing: model.snapshot.offlineNodes.isEmpty,
-                tint: Palette.sky,
-                onRefresh: { await model.refresh() }
-            ) {
-                if model.snapshot.nodes.isEmpty {
-                    EmptyStateView(symbol: "server.rack", title: "Aucun nœud",
-                                   message: "Le serveur n'a renvoyé aucun nœud. Vérifiez les permissions du compte utilisé.")
+            List {
+                if snapshot.isEmpty {
+                    emptyState
                 } else {
-                    VStack(spacing: Metrics.stackSpacing) {
-                        ForEach(model.snapshot.nodes) { node in
+                    Section {
+                        ForEach(snapshot.nodes) { node in
                             NavigationLink(value: Route.node(node.displayName)) {
-                                NodeCard(node: node, history: model.history(forNode: node.displayName))
+                                NodeCardRow(node: node, history: model.history(forNode: node.displayName))
                             }
-                            .buttonStyle(.pressable)
-                            .settleOnScroll()
                         }
+                    } footer: {
+                        Text("\(snapshot.onlineNodes.count) of \(snapshot.nodes.count) online · \(Int(snapshot.totalCores)) cores · \(Format.bytes(snapshot.memoryTotal)) memory")
                     }
 
-                    if let cluster = model.snapshot.clusterNodes.first(where: { $0.type == "cluster" }) {
-                        clusterCard(cluster)
+                    if let cluster = snapshot.clusterNodes.first(where: { $0.type == "cluster" }) {
+                        Section("Cluster") {
+                            LabeledContent("Name", value: cluster.name)
+                            LabeledContent("Quorum") {
+                                Text((cluster.quorate ?? false) ? "Established" : "Lost")
+                                    .foregroundStyle((cluster.quorate ?? false) ? Palette.positive : Palette.critical)
+                            }
+                            LabeledContent("Members", value: "\(cluster.nodes ?? snapshot.nodes.count)")
+                            if let version = snapshot.version?.version {
+                                LabeledContent("Proxmox VE", value: version)
+                            }
+                        }
                     }
                 }
             }
+            .proxynList()
+            .navigationTitle("Nodes")
+            .refreshable { await model.refresh() }
             .proxynDestinations()
+            .handlesDeepLinks(for: .nodes, path: $path)
         }
     }
 
-    private func clusterCard(_ cluster: PVEClusterNodeStatus) -> some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel("Cluster")
-                    .padding(.bottom, 6)
-                DetailRow(label: "Nom", value: cluster.name)
-                DetailRow(label: "Quorum",
-                          value: (cluster.quorate ?? false) ? "établi" : "perdu",
-                          valueColor: (cluster.quorate ?? false) ? Palette.mint : Palette.rose)
-                DetailRow(label: "Membres", value: "\(cluster.nodes ?? 0)")
-                if let version = cluster.version {
-                    DetailRow(label: "Version de configuration", value: "\(version)")
-                }
-            }
+    @ViewBuilder
+    private var emptyState: some View {
+        if model.connection == .connecting {
+            HStack { Spacer(); ProgressView(); Spacer() }
+        } else {
+            ContentUnavailableView("No Nodes", systemImage: "server.rack",
+                                   description: Text("Nothing to show yet. Check the connection on the Overview tab."))
         }
     }
 }
 
-/// Full-width node card.
-struct NodeCard: View {
+/// Richer node row for the Nodes tab: identity, then the three capacities.
+private struct NodeCardRow: View {
     var node: PVEResource
-    var history: LiveHistory
+    var history: [Double]
 
     var body: some View {
-        GlassCard(padding: 17, tint: node.state.isUp ? nil : Palette.rose) {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 9) {
-                    StatusPip(color: Palette.state(node.state),
-                              pulsing: node.state.isUp, size: 7,
-                              hollow: !node.state.isUp)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                StatusDot(state: node.state)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(node.displayName)
-                        .font(.system(size: 18, weight: .semibold))
-                        .tracking(-0.3)
-                        .foregroundStyle(Palette.ink)
-                    Spacer(minLength: 8)
+                        .font(.headline)
+                        .lineLimit(1)
                     Text(node.state.isUp
-                         ? "\(Int(node.maxcpu ?? 0)) cœurs · \(Format.uptime(node.uptime))"
-                         : node.state.label.lowercased())
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Palette.inkTertiary)
+                         ? "\(Int(node.maxcpu ?? 0)) cores · up \(Format.uptime(node.uptime))"
+                         : node.state.label)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-
-                if history.cpu.count > 2 {
-                    Sparkline(values: history.cpu, tint: Palette.ember, filled: true)
-                        .frame(height: 34)
-                }
-
-                VStack(spacing: 15) {
-                    VitalRow(label: "Processeur",
-                             value: Format.percent(node.cpuFraction), unit: "%",
-                             fraction: node.cpuFraction,
-                             tint: Palette.ember, valueSize: 19)
-                    LabeledMeter(label: "Mémoire", fraction: node.memFraction,
-                                 detail: "\(Format.bytes(node.mem)) / \(Format.bytes(node.maxmem))")
-                    LabeledMeter(label: "Racine", fraction: node.diskFraction,
-                                 detail: "\(Format.bytes(node.disk)) / \(Format.bytes(node.maxdisk))")
+                .layoutPriority(1)
+                Spacer(minLength: 8)
+                if node.state.isUp, history.count > 2 {
+                    Sparkline(values: history, tint: Palette.accent)
+                        .frame(width: 72, height: 26)
                 }
             }
+
+            if node.state.isUp {
+                VStack(spacing: 10) {
+                    UsageRow(title: "CPU", value: Format.percent(node.cpuFraction), detail: nil,
+                             fraction: node.cpuFraction, tint: Palette.accent)
+                    UsageRow(title: "Memory", value: Format.bytes(node.mem),
+                             detail: "of \(Format.bytes(node.maxmem))", fraction: node.memFraction)
+                    UsageRow(title: "Root disk", value: Format.bytes(node.disk),
+                             detail: "of \(Format.bytes(node.maxdisk))", fraction: node.diskFraction)
+                }
+                .font(.subheadline)
+                .padding(.leading, 20)
+            }
         }
+        .padding(.vertical, 6)
     }
 }
