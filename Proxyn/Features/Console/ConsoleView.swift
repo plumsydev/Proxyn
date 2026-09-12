@@ -6,9 +6,9 @@ enum ConsoleTarget: Hashable {
     case node(String)
 }
 
-/// Embedded noVNC / xterm.js console. Proxmox's own web console is loaded in a
-/// WKWebView with the session ticket injected as a cookie, which is the only way
-/// to get a real framebuffer / shell on iOS without reimplementing VNC.
+/// Proxmox's own noVNC / xterm.js console in a web view, authenticated with the
+/// session ticket. This gives a real framebuffer and shell without
+/// reimplementing the VNC protocol.
 struct ConsoleView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -16,7 +16,7 @@ struct ConsoleView: View {
     let title: String
 
     @State private var session: PVESession?
-    @State private var error: String?
+    @State private var errorMessage: String?
     @State private var loading = true
     @State private var reloadToken = UUID()
 
@@ -26,100 +26,76 @@ struct ConsoleView: View {
                 Color.black.ignoresSafeArea()
 
                 if let session, let url = consoleURL, let profile = app.selectedServer {
-                    ConsoleWebView(url: url,
-                                   ticket: session.ticket,
-                                   host: profile.host,
-                                   allowInsecureTLS: profile.allowInsecureTLS,
-                                   isLoading: $loading)
+                    ConsoleWebView(url: url, ticket: session.ticket, profile: profile, isLoading: $loading)
                         .id(reloadToken)
                         .ignoresSafeArea(edges: .bottom)
                 }
 
-                if loading && error == nil {
-                    VStack(spacing: 14) {
-                        ProgressView().controlSize(.large).tint(Palette.ember)
-                        Text("Ouverture de la console…")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Palette.inkSecondary)
+                if let errorMessage {
+                    ContentUnavailableView {
+                        Label("Console Unavailable", systemImage: "apple.terminal")
+                    } description: {
+                        Text(errorMessage)
                     }
-                }
-
-                if let error {
-                    VStack(spacing: 16) {
-                        EmptyStateView(symbol: "terminal", title: "Console indisponible", message: error)
-                        Button("Fermer") { dismiss() }
-                            .buttonStyle(QuietButtonStyle(tint: Palette.ember))
-                    }
-                    .padding(24)
+                    .foregroundStyle(.white)
+                } else if loading {
+                    ProgressView()
+                        .tint(.white)
                 }
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Palette.canvas, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Fermer") { dismiss() }.foregroundStyle(Palette.inkSecondary)
+                    Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Haptics.tap()
+                    Button("Reload", systemImage: "arrow.clockwise") {
                         loading = true
                         reloadToken = UUID()
-                    } label: {
-                        Image(systemName: "arrow.clockwise").foregroundStyle(Palette.ember)
                     }
+                    .disabled(session == nil)
                 }
             }
         }
-        .presentationBackground(.black)
         .task { await prepare() }
     }
 
     private var consoleURL: URL? {
-        guard let profile = app.selectedServer, let base = profile.baseURL else { return nil }
-        var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        var items: [URLQueryItem] = []
+        guard let base = app.selectedServer?.baseURL,
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
 
         switch target {
+        case .guest(let ref) where ref.kind == .qemu:
+            components.queryItems = [
+                .init(name: "console", value: "kvm"), .init(name: "novnc", value: "1"),
+                .init(name: "vmid", value: String(ref.vmid)), .init(name: "node", value: ref.node),
+                .init(name: "resize", value: "scale")
+            ]
         case .guest(let ref):
-            if ref.kind == .qemu {
-                items = [.init(name: "console", value: "kvm"),
-                         .init(name: "novnc", value: "1"),
-                         .init(name: "vmid", value: String(ref.vmid)),
-                         .init(name: "node", value: ref.node),
-                         .init(name: "resize", value: "scale"),
-                         .init(name: "cmd", value: "")]
-            } else {
-                items = [.init(name: "console", value: "lxc"),
-                         .init(name: "xtermjs", value: "1"),
-                         .init(name: "vmid", value: String(ref.vmid)),
-                         .init(name: "node", value: ref.node),
-                         .init(name: "cmd", value: "")]
-            }
+            components.queryItems = [
+                .init(name: "console", value: "lxc"), .init(name: "xtermjs", value: "1"),
+                .init(name: "vmid", value: String(ref.vmid)), .init(name: "node", value: ref.node)
+            ]
         case .node(let node):
-            items = [.init(name: "console", value: "shell"),
-                     .init(name: "xtermjs", value: "1"),
-                     .init(name: "node", value: node),
-                     .init(name: "cmd", value: "")]
+            components.queryItems = [
+                .init(name: "console", value: "shell"), .init(name: "xtermjs", value: "1"),
+                .init(name: "node", value: node)
+            ]
         }
-
-        components?.queryItems = items
-        return components?.url
+        return components.url
     }
 
     private func prepare() async {
         guard let client = app.client() else {
-            error = "Aucun serveur sélectionné."
-            loading = false
+            errorMessage = "No server is selected."
             return
         }
         do {
             session = try await client.consoleCredentials()
-        } catch let err as ProxmoxError {
-            error = err.localizedDescription
-            loading = false
         } catch {
-            self.error = error.localizedDescription
+            errorMessage = (error as? ProxmoxError)?.localizedDescription ?? error.localizedDescription
             loading = false
         }
     }
@@ -128,39 +104,34 @@ struct ConsoleView: View {
 private struct ConsoleWebView: UIViewRepresentable {
     let url: URL
     let ticket: String
-    let host: String
-    let allowInsecureTLS: Bool
+    let profile: ServerProfile
     @Binding var isLoading: Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(allowInsecureTLS: allowInsecureTLS, isLoading: $isLoading)
+        Coordinator(profile: profile, isLoading: $isLoading)
     }
 
     func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.allowsInlineMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = []
-        config.websiteDataStore = .nonPersistent()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.allowsInlineMediaPlayback = true
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         webView.scrollView.bounces = false
-        webView.allowsBackForwardNavigationGestures = false
 
-        // The console page authenticates from the PVEAuthCookie alone.
-        let cookieProperties: [HTTPCookiePropertyKey: Any] = [
-            .domain: host,
+        let cookie = HTTPCookie(properties: [
+            .domain: profile.host,
             .path: "/",
             .name: "PVEAuthCookie",
             .value: ticket,
-            .secure: "TRUE",
-            .version: "0"
-        ]
-        if let cookie = HTTPCookie(properties: cookieProperties) {
-            webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+            .secure: profile.useHTTPS ? "TRUE" : "FALSE"
+        ])
+        if let cookie {
+            configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
                 webView.load(URLRequest(url: url))
             }
         } else {
@@ -172,11 +143,11 @@ private struct ConsoleWebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate {
-        private let allowInsecureTLS: Bool
+        private let profile: ServerProfile
         @Binding private var isLoading: Bool
 
-        init(allowInsecureTLS: Bool, isLoading: Binding<Bool>) {
-            self.allowInsecureTLS = allowInsecureTLS
+        init(profile: ServerProfile, isLoading: Binding<Bool>) {
+            self.profile = profile
             _isLoading = isLoading
         }
 
@@ -193,16 +164,25 @@ private struct ConsoleWebView: UIViewRepresentable {
             isLoading = false
         }
 
-        func webView(_ webView: WKWebView,
-                     didReceive challenge: URLAuthenticationChallenge,
+        /// Same policy as the API client: the pinned fingerprint, then system
+        /// trust, then the explicit "skip verification" setting.
+        func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
                      completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-            guard allowInsecureTLS,
-                  challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+            guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
                   let trust = challenge.protectionSpace.serverTrust else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
-            completionHandler(.useCredential, URLCredential(trust: trust))
+            let outcome = TLSTrustDelegate.evaluate(
+                fingerprint: TLSTrustDelegate.leafFingerprint(of: trust),
+                pinned: profile.pinnedCertificateSHA256,
+                systemTrusts: SecTrustEvaluateWithError(trust, nil),
+                skipVerification: profile.skipCertificateVerification)
+            if outcome == .trusted {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
         }
     }
 }
