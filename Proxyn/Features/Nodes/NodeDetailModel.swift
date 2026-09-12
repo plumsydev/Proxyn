@@ -80,25 +80,25 @@ final class NodeDetailModel {
     // MARK: Derived chart series
 
     var cpuSeries: [MetricSeries] {
-        var out = [metrics.series("cpu", label: "CPU", unit: .percent, color: "ember")]
-        let io = metrics.series("iowait", label: "I/O wait", unit: .percent, color: "rose")
+        var out = [metrics.series("cpu", label: "CPU", unit: .percent, color: "primary")]
+        let io = metrics.series("iowait", label: "IO delay", unit: .percent, color: "secondary")
         if io.points.contains(where: { $0.value > 0 }) { out.append(io) }
         return out
     }
 
     var memorySeries: [MetricSeries] {
-        [metrics.series("memused", label: "Utilisée", unit: .bytes, color: "sky"),
-         metrics.series("swapused", label: "Swap", unit: .bytes, color: "violet")]
+        [metrics.series("memused", label: "Used", unit: .bytes, color: "primary"),
+         metrics.series("swapused", label: "Swap", unit: .bytes, color: "secondary")]
             .filter { !$0.points.isEmpty }
     }
 
     var networkSeries: [MetricSeries] {
-        [metrics.series("netin", label: "Entrant", unit: .bytesPerSecond, color: "sky"),
-         metrics.series("netout", label: "Sortant", unit: .bytesPerSecond, color: "mint")]
+        [metrics.series("netin", label: "In", unit: .bytesPerSecond, color: "primary"),
+         metrics.series("netout", label: "Out", unit: .bytesPerSecond, color: "secondary")]
     }
 
     var loadSeries: [MetricSeries] {
-        [metrics.series("loadavg", label: "Charge", unit: .raw, color: "amber")]
+        [metrics.series("loadavg", label: "Load", unit: .raw, color: "primary")]
     }
 
     var runningServices: Int { services.filter(\.isRunning).count }
