@@ -1,68 +1,52 @@
 import SwiftUI
 
-/// Launch sequence: the mark strokes itself in, the rack units fill, the
-/// wordmark settles, then the whole thing lifts a few points and dissolves as
-/// the app fades up behind it. Under two seconds, and a tap skips it.
+/// Launch sequence: the mark draws itself, then the view dissolves into the
+/// app. About a second, skippable with a tap, instant with Reduce Motion.
 struct SplashView: View {
     var onFinish: () -> Void
 
-    @State private var markProgress: Double = 0
-    @State private var wordProgress: Double = 0
-    @State private var taglineOpacity: Double = 0
-    @State private var isLeaving = false
+    @State private var progress: Double = 0
+    @State private var titleVisible = false
+    @State private var finished = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            Palette.canvas.ignoresSafeArea()
+            Color(uiColor: .systemBackground).ignoresSafeArea()
 
-            VStack(spacing: 26) {
-                ProxynMark(size: 88, progress: markProgress)
-
-                VStack(spacing: 10) {
-                    ProxynWordmark(progress: wordProgress, size: 25)
-                    Text("Contrôle Proxmox")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.inkTertiary)
-                        .opacity(taglineOpacity)
-                }
+            VStack(spacing: 18) {
+                ProxynMark(size: 76, progress: progress)
+                Text("Proxyn")
+                    .font(.title2.weight(.semibold))
+                    .opacity(titleVisible ? 1 : 0)
+                    .offset(y: titleVisible ? 0 : 4)
             }
-            .offset(y: isLeaving ? -10 : 0)
-            .opacity(isLeaving ? 0 : 1)
         }
         .contentShape(Rectangle())
-        .onTapGesture { finish(immediate: true) }
+        .onTapGesture(perform: finish)
         .task { await run() }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Proxyn, contrôle Proxmox")
+        .accessibilityLabel("Proxyn")
     }
 
     private func run() async {
-        if reduceMotion {
-            markProgress = 1; wordProgress = 1; taglineOpacity = 1
-            try? await Task.sleep(for: .milliseconds(420))
-            finish(immediate: true)
+        guard !reduceMotion else {
+            progress = 1
+            titleVisible = true
+            try? await Task.sleep(for: .milliseconds(250))
+            finish()
             return
         }
-
-        withAnimation(.easeInOut(duration: 0.95)) { markProgress = 1 }
-
-        try? await Task.sleep(for: .milliseconds(560))
-        withAnimation(.smooth(duration: 0.6)) { wordProgress = 1 }
-
-        try? await Task.sleep(for: .milliseconds(220))
-        withAnimation(.easeOut(duration: 0.45)) { taglineOpacity = 1 }
-
-        try? await Task.sleep(for: .milliseconds(620))
-        finish(immediate: false)
+        withAnimation(.easeInOut(duration: 0.7)) { progress = 1 }
+        try? await Task.sleep(for: .milliseconds(380))
+        withAnimation(.smooth(duration: 0.35)) { titleVisible = true }
+        try? await Task.sleep(for: .milliseconds(520))
+        finish()
     }
 
-    private func finish(immediate: Bool) {
-        guard !isLeaving else { return }
-        withAnimation(.easeIn(duration: immediate ? 0.22 : 0.38)) { isLeaving = true }
-        Task {
-            try? await Task.sleep(for: .milliseconds(immediate ? 200 : 340))
-            onFinish()
-        }
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        onFinish()
     }
 }
