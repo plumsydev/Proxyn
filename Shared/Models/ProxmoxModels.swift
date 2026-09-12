@@ -13,9 +13,9 @@ enum PVEResourceType: String, Codable, Sendable, CaseIterable {
         switch self {
         case .node: return "server.rack"
         case .qemu: return "desktopcomputer"
-        case .lxc: return "shippingbox.fill"
-        case .storage: return "internaldrive.fill"
-        case .pool: return "folder.fill"
+        case .lxc: return "shippingbox"
+        case .storage: return "internaldrive"
+        case .pool: return "folder"
         case .sdn: return "network"
         case .unknown: return "questionmark.circle"
         }
@@ -25,7 +25,7 @@ enum PVEResourceType: String, Codable, Sendable, CaseIterable {
         switch self {
         case .node: return "Node"
         case .qemu: return "VM"
-        case .lxc: return "LXC"
+        case .lxc: return "CT"
         case .storage: return "Storage"
         case .pool: return "Pool"
         case .sdn: return "SDN"
@@ -54,13 +54,13 @@ enum PVERunState: String, Sendable {
 
     var label: String {
         switch self {
-        case .running: return "En marche"
-        case .stopped: return "Arrêté"
-        case .paused: return "En pause"
-        case .suspended: return "Suspendu"
-        case .online: return "En ligne"
-        case .offline: return "Hors ligne"
-        case .unknown: return "Inconnu"
+        case .running: return "Running"
+        case .stopped: return "Stopped"
+        case .paused: return "Paused"
+        case .suspended: return "Suspended"
+        case .online: return "Online"
+        case .offline: return "Offline"
+        case .unknown: return "Unknown"
         }
     }
 }
