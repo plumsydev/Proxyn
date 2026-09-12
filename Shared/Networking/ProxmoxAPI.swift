@@ -294,9 +294,10 @@ extension ProxmoxClient {
     @discardableResult
     func downloadToStorage(node: String, storage: String, url: String,
                            content: String, filename: String) async throws -> String? {
+        // Certificate verification stays on (the Proxmox default): the node is
+        // fetching an arbitrary file from the internet.
         try await post("/nodes/\(node)/storage/\(storage)/download-url",
-                       form: ["content": content, "filename": filename, "url": url,
-                              "verify-certificates": "0"])
+                       form: ["content": content, "filename": filename, "url": url])
     }
 
     // MARK: Backup / restore
@@ -387,25 +388,25 @@ enum GuestPowerAction: String, CaseIterable, Sendable, Identifiable {
 
     var label: String {
         switch self {
-        case .start: return "Démarrer"
-        case .shutdown: return "Arrêter"
-        case .stop: return "Forcer l'arrêt"
-        case .reboot: return "Redémarrer"
-        case .suspend: return "Suspendre"
-        case .resume: return "Reprendre"
-        case .reset: return "Réinitialiser"
+        case .start: return "Start"
+        case .shutdown: return "Shut Down"
+        case .stop: return "Force Stop"
+        case .reboot: return "Reboot"
+        case .suspend: return "Suspend"
+        case .resume: return "Resume"
+        case .reset: return "Reset"
         }
     }
 
     var symbol: String {
         switch self {
-        case .start: return "play.fill"
+        case .start: return "play"
         case .shutdown: return "power"
-        case .stop: return "stop.fill"
+        case .stop: return "stop"
         case .reboot: return "arrow.clockwise"
-        case .suspend: return "pause.fill"
-        case .resume: return "playpause.fill"
-        case .reset: return "bolt.horizontal.fill"
+        case .suspend: return "pause"
+        case .resume: return "playpause"
+        case .reset: return "bolt.horizontal"
         }
     }
 
@@ -413,10 +414,10 @@ enum GuestPowerAction: String, CaseIterable, Sendable, Identifiable {
 
     var confirmationMessage: String {
         switch self {
-        case .stop: return "L'arrêt forcé coupe l'alimentation virtuelle immédiatement. Des données non écrites peuvent être perdues."
-        case .reset: return "Réinitialisation matérielle immédiate, équivalente au bouton reset."
-        case .reboot: return "Le système invité va redémarrer proprement."
-        case .shutdown: return "Une demande d'arrêt propre est envoyée à l'invité."
+        case .stop: return "Cuts power to the guest immediately. Unsaved data may be lost."
+        case .reset: return "Performs a hard reset, like pressing the reset button."
+        case .reboot: return "The guest operating system will restart."
+        case .shutdown: return "Sends an ACPI shutdown request to the guest."
         default: return ""
         }
     }
