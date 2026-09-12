@@ -1,18 +1,24 @@
 import SwiftUI
 import Observation
+import WidgetKit
 
 enum ConnectionState: Equatable {
     case idle
     case connecting
     case connected
     case needsTOTP(challenge: String)
-    case failed(String)
+    case failed(ProxmoxError)
 
     var isConnected: Bool { self == .connected }
+
+    var failure: ProxmoxError? {
+        if case .failed(let error) = self { return error }
+        return nil
+    }
 }
 
-/// Single source of truth. Owns the server list, the live poll loop, the current
-/// snapshot and every mutating action the UI can trigger.
+/// Single source of truth: server list, live polling, the current snapshot, and
+/// every mutating action the UI can trigger.
 @MainActor
 @Observable
 final class AppModel {
@@ -30,36 +36,37 @@ final class AppModel {
         return settings.servers.first { $0.id == id } ?? settings.servers.first
     }
 
+    var preferredColorScheme: ColorScheme? {
+        switch settings.appearance {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
     // MARK: Live state
 
-    var snapshot = ClusterSnapshot()
-    var history = LiveHistory()
-    var connection: ConnectionState = .idle
-    var isRefreshing = false
-    var lastError: String?
-    var toasts: [Toast] = []
-    var pendingTOTP: String?
-    var hasCompletedSplash = false
+    private(set) var snapshot = ClusterSnapshot.empty
+    private(set) var history = LiveHistory()
+    private(set) var connection: ConnectionState = .idle
+    private(set) var lastRefreshError: ProxmoxError?
+    private(set) var toasts: [Toast] = []
 
-    /// Per-guest rolling metrics so detail screens animate between RRD updates.
-    private(set) var guestHistory: [String: LiveHistory] = [:]
-    private(set) var nodeHistory: [String: LiveHistory] = [:]
+    private var guestHistory: [String: LiveHistory] = [:]
+    private var nodeHistory: [String: LiveHistory] = [:]
+    private var previousCounters: [String: (netin: Double, netout: Double, at: Date)] = [:]
 
     private var clients: [UUID: ProxmoxClient] = [:]
     private var pollTask: Task<Void, Never>?
     private var watchers: [String: Task<Void, Never>] = [:]
-    private var previousCounters: [String: (netin: Double, netout: Double, at: Date)] = [:]
 
-    private static let storageKey = "proxyn.settings.v1"
+    private static let storageKey = "proxyn.settings.v2"
 
     // MARK: Init
 
     init(preview: Bool = false) {
-        if preview {
-            settings = AppSettings()
-            return
-        }
-        if let data = AppGroup.defaults.data(forKey: Self.storageKey),
+        if !preview,
+           let data = AppGroup.defaults.data(forKey: Self.storageKey),
            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
             settings = decoded
         } else {
@@ -74,14 +81,17 @@ final class AppModel {
         SharedSnapshotStore.saveServers(settings.servers, selected: settings.selectedServerID)
     }
 
-    // MARK: Settings mutation
-
     func update(_ transform: (inout AppSettings) -> Void) {
         var copy = settings
         transform(&copy)
+        guard copy != settings else { return }
+        let intervalChanged = copy.refreshInterval != settings.refreshInterval
         settings = copy
         Haptics.enabled = settings.hapticsEnabled
+        if intervalChanged, connection.isConnected { startPolling() }
     }
+
+    // MARK: Servers
 
     func addServer(_ profile: ServerProfile) {
         update {
@@ -89,71 +99,84 @@ final class AppModel {
             $0.selectedServerID = profile.id
         }
         clients[profile.id] = nil
-        Task { await connectAndRefresh(reset: true) }
+        Task { await connect(reset: true) }
     }
 
     func updateServer(_ profile: ServerProfile) {
         update { settings in
-            if let idx = settings.servers.firstIndex(where: { $0.id == profile.id }) {
-                settings.servers[idx] = profile
+            if let index = settings.servers.firstIndex(where: { $0.id == profile.id }) {
+                settings.servers[index] = profile
             }
         }
         clients[profile.id] = nil
         if profile.id == selectedServer?.id {
-            Task { await connectAndRefresh(reset: true) }
+            Task { await connect(reset: true) }
         }
     }
 
     func deleteServer(_ profile: ServerProfile) {
-        Keychain.remove(profile.secretKey)
+        profile.secret = nil
         clients[profile.id] = nil
         update { settings in
             settings.servers.removeAll { $0.id == profile.id }
+            settings.favoriteGuestIDs.removeAll { $0.hasPrefix("\(profile.id.uuidString)|") }
             if settings.selectedServerID == profile.id {
                 settings.selectedServerID = settings.servers.first?.id
             }
         }
         if servers.isEmpty {
-            snapshot = ClusterSnapshot()
-            connection = .idle
             stopPolling()
+            resetLiveState()
+            connection = .idle
+            SharedSnapshotStore.clear()
+            WidgetCenter.shared.reloadAllTimelines()
         } else {
-            Task { await connectAndRefresh(reset: true) }
+            Task { await connect(reset: true) }
         }
     }
 
     func selectServer(_ profile: ServerProfile) {
         guard profile.id != selectedServer?.id else { return }
-        Haptics.commit()
+        Haptics.select()
         update { $0.selectedServerID = profile.id }
-        snapshot = ClusterSnapshot()
-        history.reset()
-        guestHistory.removeAll()
-        nodeHistory.removeAll()
-        Task { await connectAndRefresh(reset: true) }
+        Task { await connect(reset: true) }
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    /// The certificate of the active server changed and the user accepted the
+    /// new one.
+    func trustCurrentCertificate(_ fingerprint: String) {
+        guard var profile = selectedServer else { return }
+        profile.pinnedCertificateSHA256 = fingerprint
+        updateServer(profile)
+    }
+
+    // MARK: Favourites
+
+    private func favoriteKey(_ resource: PVEResource) -> String {
+        "\(selectedServer?.id.uuidString ?? "-")|\(resource.routeKey)"
+    }
+
+    func isFavorite(_ resource: PVEResource) -> Bool {
+        settings.favoriteGuestIDs.contains(favoriteKey(resource))
     }
 
     func toggleFavorite(_ resource: PVEResource) {
-        let key = resource.routeKey
+        let key = favoriteKey(resource)
         Haptics.tap()
         update { settings in
-            if let idx = settings.favoriteGuestIDs.firstIndex(of: key) {
-                settings.favoriteGuestIDs.remove(at: idx)
+            if let index = settings.favoriteGuestIDs.firstIndex(of: key) {
+                settings.favoriteGuestIDs.remove(at: index)
             } else {
                 settings.favoriteGuestIDs.append(key)
             }
         }
     }
 
-    func isFavorite(_ resource: PVEResource) -> Bool {
-        settings.favoriteGuestIDs.contains(resource.routeKey)
-    }
-
-    // MARK: Client access
+    // MARK: Clients
 
     func client() -> ProxmoxClient? {
-        guard let profile = selectedServer else { return nil }
-        return client(for: profile)
+        selectedServer.map(client(for:))
     }
 
     func client(for profile: ServerProfile) -> ProxmoxClient {
@@ -163,71 +186,129 @@ final class AppModel {
         return made
     }
 
-    // MARK: Connection & polling
+    // MARK: Connection
 
-    func connectAndRefresh(reset: Bool = false) async {
+    func connect(reset: Bool = false) async {
         guard let profile = selectedServer else {
             connection = .idle
             return
         }
-        if reset { snapshot = ClusterSnapshot(); history.reset() }
+        if reset { resetLiveState() }
         connection = .connecting
         let api = client(for: profile)
 
         do {
-            if profile.authMethod == .ticket {
-                let authed = await api.isAuthenticated
-                if !authed { try await api.login() }
+            if profile.authMethod == .ticket, !(await api.isAuthenticated) {
+                try await api.login()
             }
-            connection = .connected
-            pendingTOTP = nil
-            update { settings in
-                if let idx = settings.servers.firstIndex(where: { $0.id == profile.id }) {
-                    settings.servers[idx].lastConnectedAt = Date()
-                }
-            }
-            await refresh()
-            startPolling()
+            await didConnect(profile)
         } catch let error as ProxmoxError {
-            if case .needsTOTP(let challenge) = error {
-                connection = .needsTOTP(challenge: challenge)
-                pendingTOTP = challenge
-            } else {
-                connection = .failed(error.localizedDescription)
-                lastError = error.localizedDescription
-            }
+            handleConnectionError(error)
         } catch {
-            connection = .failed(error.localizedDescription)
-            lastError = error.localizedDescription
+            handleConnectionError(.transport(error.localizedDescription))
         }
     }
 
     func submitTOTP(_ code: String) async {
-        guard let profile = selectedServer, let challenge = pendingTOTP else { return }
-        let api = client(for: profile)
+        guard let profile = selectedServer, case .needsTOTP(let challenge) = connection else { return }
         connection = .connecting
         do {
-            try await api.login(totpCode: code, tfaChallenge: challenge)
-            pendingTOTP = nil
-            connection = .connected
-            await refresh()
-            startPolling()
+            try await client(for: profile).login(totpCode: code, tfaChallenge: challenge)
             Haptics.success()
-        } catch {
+            await didConnect(profile)
+        } catch let error as ProxmoxError {
             Haptics.failure()
-            connection = .needsTOTP(challenge: challenge)
-            lastError = (error as? ProxmoxError)?.localizedDescription ?? error.localizedDescription
+            if case .badCredentials = error {
+                // Wrong code: keep the prompt up with a fresh challenge.
+                connection = .idle
+                await connect()
+                toast(.failure, "That code didn't work")
+            } else {
+                handleConnectionError(error)
+            }
+        } catch {
+            handleConnectionError(.transport(error.localizedDescription))
         }
     }
 
+    func cancelTOTP() {
+        connection = .failed(.notAuthenticated)
+    }
+
+    private func didConnect(_ profile: ServerProfile) async {
+        connection = .connected
+        update { settings in
+            if let index = settings.servers.firstIndex(where: { $0.id == profile.id }) {
+                settings.servers[index].lastConnectedAt = Date()
+            }
+        }
+        await refresh()
+        startPolling()
+    }
+
+    private func handleConnectionError(_ error: ProxmoxError) {
+        if case .needsTOTP(let challenge) = error {
+            connection = .needsTOTP(challenge: challenge)
+        } else {
+            Log.auth.error("Connection failed: \(error.localizedDescription, privacy: .public)")
+            connection = .failed(error)
+        }
+    }
+
+    /// Scene became active: refresh immediately, reconnecting if needed.
+    func resume() async {
+        guard selectedServer != nil else { return }
+        switch connection {
+        case .connected:
+            await refresh()
+            startPolling()
+        case .needsTOTP, .connecting:
+            break
+        case .idle, .failed:
+            await connect()
+        }
+    }
+
+    /// Scene went to the background: stop polling and let the widget pick up
+    /// the latest snapshot.
+    func suspend() {
+        stopPolling()
+        if !snapshot.isEmpty {
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
+    // MARK: Deep links
+
+    /// Set when a widget opens the app; the tab that owns the destination
+    /// pushes it once the data it needs is available.
+    var pendingDeepLink: DeepLink?
+
+    func route(for link: DeepLink) -> Route? {
+        switch link {
+        case .overview, .activity:
+            return nil
+        case .guest(let vmid):
+            guard let guest = snapshot.guests.first(where: { $0.vmid == vmid }),
+                  let ref = GuestRef(resource: guest) else { return nil }
+            return .guest(ref: ref, name: guest.displayName)
+        case .node(let name):
+            return .node(name)
+        case .storage(let node, let storage):
+            return .storage(node: node, storage: storage)
+        }
+    }
+
+    // MARK: Polling
+
     func startPolling() {
         stopPolling()
-        let interval = max(2, settings.liveRefreshInterval)
+        let interval = max(2, settings.refreshInterval)
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, !Task.isCancelled else { return }
-                await self.refresh(silent: true)
+                await self.refresh()
             }
         }
     }
@@ -237,143 +318,138 @@ final class AppModel {
         pollTask = nil
     }
 
-    @discardableResult
-    func refresh(silent: Bool = false) async -> Bool {
-        guard let api = client() else { return false }
-        if !silent { isRefreshing = true }
-        defer { if !silent { isRefreshing = false } }
+    func refresh() async {
+        guard let api = client(), let profile = selectedServer else { return }
 
         do {
-            async let resourcesTask = api.clusterResources()
-            async let statusTask = api.clusterStatus()
-            async let tasksTask = api.clusterTasks()
+            async let resourcesRequest = api.clusterResources()
+            async let statusRequest = api.clusterStatus()
+            async let tasksRequest = api.clusterTasks()
 
-            let loaded = try await resourcesTask
-            var snap = ClusterSnapshot()
-            snap.resources = loaded
-            snap.clusterNodes = (try? await statusTask) ?? []
-            snap.tasks = (try? await tasksTask) ?? []
-            snap.version = snapshot.version
-            snap.capturedAt = Date()
+            let resources = try await resourcesRequest
+            let status = (try? await statusRequest) ?? []
+            let tasks = (try? await tasksRequest) ?? []
+            var version = snapshot.version
+            if version == nil { version = try? await api.version() }
 
-            if snapshot.version == nil {
-                snap.version = try? await api.version()
-            }
-
-            applySnapshot(snap)
-            lastError = nil
+            apply(ClusterSnapshot(resources: resources, clusterNodes: status, tasks: tasks,
+                                  version: version, capturedAt: Date()),
+                  serverName: profile.displayName)
+            lastRefreshError = nil
             if connection != .connected { connection = .connected }
-            return true
         } catch let error as ProxmoxError {
-            if case .cancelled = error { return false }
+            if case .cancelled = error { return }
+            lastRefreshError = error
             if error.isAuthFailure {
                 await api.invalidateSession()
-                connection = .failed(error.localizedDescription)
+                connection = .failed(error)
             }
-            lastError = error.localizedDescription
-            return false
         } catch {
-            lastError = error.localizedDescription
-            return false
+            lastRefreshError = .transport(error.localizedDescription)
         }
     }
 
-    private func applySnapshot(_ snap: ClusterSnapshot) {
-        // Derive instantaneous network throughput from the cumulative counters.
+    private func apply(_ new: ClusterSnapshot, serverName: String) {
+        let now = new.capturedAt
+
+        // Instantaneous throughput from the cumulative counters.
         var totalIn = 0.0, totalOut = 0.0
-        let now = Date()
-        for guest in snap.guests where guest.state.isUp {
-            let key = guest.id
-            let inBytes = guest.netin ?? 0
-            let outBytes = guest.netout ?? 0
-            if let prev = previousCounters[key] {
-                let dt = now.timeIntervalSince(prev.at)
-                if dt > 0.5, inBytes >= prev.netin, outBytes >= prev.netout {
-                    totalIn += (inBytes - prev.netin) / dt
-                    totalOut += (outBytes - prev.netout) / dt
+        var counters: [String: (netin: Double, netout: Double, at: Date)] = [:]
+        for guest in new.runningGuests {
+            let inBytes = guest.netin ?? 0, outBytes = guest.netout ?? 0
+            if let previous = previousCounters[guest.id] {
+                let elapsed = now.timeIntervalSince(previous.at)
+                if elapsed > 0.5, inBytes >= previous.netin, outBytes >= previous.netout {
+                    totalIn += (inBytes - previous.netin) / elapsed
+                    totalOut += (outBytes - previous.netout) / elapsed
                 }
             }
-            previousCounters[key] = (inBytes, outBytes, now)
+            counters[guest.id] = (inBytes, outBytes, now)
         }
+        previousCounters = counters
 
-        withAnimation(Motion.meter) {
-            snapshot = snap
-        }
-        history.append(cpu: snap.aggregateCPU, memory: snap.aggregateMemory,
-                       netIn: totalIn, netOut: totalOut, at: now)
+        history.append(cpu: new.aggregateCPU, memory: new.aggregateMemory, netIn: totalIn, netOut: totalOut)
 
-        for node in snap.nodes {
+        // Rebuilt from the snapshot each time, so histories of deleted guests
+        // and removed nodes don't accumulate for the lifetime of the app.
+        var nodes: [String: LiveHistory] = [:]
+        for node in new.nodes {
             var h = nodeHistory[node.displayName] ?? LiveHistory()
-            h.append(cpu: node.cpuFraction, memory: node.memFraction, netIn: 0, netOut: 0, at: now)
-            nodeHistory[node.displayName] = h
+            h.append(cpu: node.cpuFraction, memory: node.memFraction)
+            nodes[node.displayName] = h
         }
-        for guest in snap.guests {
-            var h = guestHistory[guest.id] ?? LiveHistory()
-            h.append(cpu: guest.cpuFraction, memory: guest.memFraction, netIn: 0, netOut: 0, at: now)
-            guestHistory[guest.id] = h
-        }
+        nodeHistory = nodes
 
-        SharedSnapshotStore.save(snapshot: snap, serverName: selectedServer?.displayName ?? "Proxmox")
+        var guests: [String: LiveHistory] = [:]
+        for guest in new.guests {
+            var h = guestHistory[guest.id] ?? LiveHistory()
+            h.append(cpu: guest.cpuFraction, memory: guest.memFraction)
+            guests[guest.id] = h
+        }
+        guestHistory = guests
+
+        withAnimation(Motion.value) { snapshot = new }
+        SharedSnapshotStore.save(snapshot: new, serverID: selectedServer?.id, serverName: serverName)
     }
 
-    func history(forGuest id: String) -> LiveHistory { guestHistory[id] ?? LiveHistory() }
-    func history(forNode name: String) -> LiveHistory { nodeHistory[name] ?? LiveHistory() }
+    private func resetLiveState() {
+        snapshot = .empty
+        history.reset()
+        guestHistory = [:]
+        nodeHistory = [:]
+        previousCounters = [:]
+        lastRefreshError = nil
+    }
+
+    func history(forGuest id: String) -> [Double] { guestHistory[id]?.cpu ?? [] }
+    func history(forNode name: String) -> [Double] { nodeHistory[name]?.cpu ?? [] }
 
     // MARK: Toasts
 
     func toast(_ kind: Toast.Kind, _ title: String, detail: String? = nil,
                upid: String? = nil, node: String? = nil) {
         let toast = Toast(kind: kind, title: title, detail: detail, upid: upid, node: node)
-        withAnimation(Motion.snap) { toasts.append(toast) }
-        if kind != .progress {
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(kind == .failure ? 6 : 3.2))
-                self?.dismiss(toast)
-            }
+        withAnimation(Motion.standard) {
+            toasts.removeAll { $0.upid != nil && $0.upid == upid }
+            toasts.append(toast)
+            if toasts.count > 3 { toasts.removeFirst(toasts.count - 3) }
+        }
+        guard kind != .progress else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(kind == .failure ? 6 : 3))
+            self?.dismiss(toast)
         }
     }
 
     func dismiss(_ toast: Toast) {
-        withAnimation(Motion.snap) { toasts.removeAll { $0.id == toast.id } }
+        withAnimation(Motion.standard) { toasts.removeAll { $0.id == toast.id } }
     }
 
-    private func replaceToast(upid: String, with new: Toast) {
-        withAnimation(Motion.snap) {
-            toasts.removeAll { $0.upid == upid }
-            toasts.append(new)
-        }
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(new.kind == .failure ? 6 : 3.2))
-            self?.dismiss(new)
-        }
-    }
+    // MARK: Actions
 
-    // MARK: Running a mutating action
-
-    /// Wraps an API call: optimistic toast, UPID tracking, error surfacing, and
-    /// an immediate refresh once the task settles.
+    /// Runs a mutating API call: progress toast, UPID tracking until the task
+    /// settles, error surfacing, refresh.
     @discardableResult
-    func perform(_ title: String, node: String?, work: @escaping (ProxmoxClient) async throws -> String?) async -> Bool {
+    func perform(_ title: String, node: String?,
+                 work: @escaping (ProxmoxClient) async throws -> String?) async -> Bool {
         guard let api = client() else { return false }
         Haptics.commit()
         do {
             let upid = try await work(api)
             if let upid, upid.hasPrefix("UPID"), let node {
-                toast(.progress, title, detail: "En cours…", upid: upid, node: node)
+                toast(.progress, title, upid: upid, node: node)
                 watch(upid: upid, node: node, title: title)
             } else {
-                toast(.success, title, detail: "Terminé")
+                toast(.success, title)
                 Haptics.success()
             }
-            await refresh(silent: true)
+            await refresh()
             return true
-        } catch let error as ProxmoxError {
-            Haptics.failure()
-            toast(.failure, title, detail: error.localizedDescription)
-            return false
         } catch {
+            let message = (error as? ProxmoxError)?.localizedDescription ?? error.localizedDescription
+            Log.network.error("\(title, privacy: .public) failed: \(message, privacy: .public)")
             Haptics.failure()
-            toast(.failure, title, detail: error.localizedDescription)
+            toast(.failure, title, detail: message)
             return false
         }
     }
@@ -381,56 +457,33 @@ final class AppModel {
     private func watch(upid: String, node: String, title: String) {
         watchers[upid]?.cancel()
         watchers[upid] = Task { [weak self] in
-            guard let self else { return }
-            let api = self.client()
-            for _ in 0..<180 {
-                try? await Task.sleep(for: .seconds(2))
-                if Task.isCancelled { return }
-                guard let api else { return }
+            defer { self?.watchers[upid] = nil }
+            // Long operations (migrations, backups) can run for a long time;
+            // stop watching after an hour and let the Activity tab take over.
+            for attempt in 0..<1_200 {
+                try? await Task.sleep(for: .seconds(attempt < 10 ? 1.5 : 3))
+                guard let self, !Task.isCancelled, let api = self.client() else { return }
                 guard let status = try? await api.taskStatus(node: node, upid: upid) else { continue }
-                if !status.isRunning {
-                    if status.succeeded {
-                        self.replaceToast(upid: upid, with: Toast(kind: .success, title: title,
-                                                                  detail: "Terminé en \(Format.duration(status.duration))"))
-                        Haptics.success()
-                    } else {
-                        self.replaceToast(upid: upid, with: Toast(kind: .failure, title: title,
-                                                                  detail: status.exitStatus ?? "Échec",
-                                                                  upid: upid, node: node))
-                        Haptics.failure()
-                    }
-                    await self.refresh(silent: true)
-                    self.watchers[upid] = nil
-                    return
+                guard !status.isRunning else { continue }
+
+                withAnimation(Motion.standard) { self.toasts.removeAll { $0.upid == upid } }
+                if status.succeeded {
+                    self.toast(.success, title, detail: "Finished in \(Format.duration(status.duration))")
+                    Haptics.success()
+                } else {
+                    self.toast(.failure, title, detail: status.exitStatus ?? "Failed",
+                               upid: upid, node: node)
+                    Haptics.failure()
                 }
-                await self.refresh(silent: true)
+                await self.refresh()
+                return
             }
-            self.watchers[upid] = nil
         }
     }
-
-    // MARK: Guest actions
 
     func power(_ ref: GuestRef, action: GuestPowerAction, name: String) async {
-        await perform("\(action.label) · \(name)", node: ref.node) { api in
+        await perform("\(action.label) \(name)", node: ref.node) { api in
             try await api.guestPower(ref, action: action)
-        }
-    }
-}
-
-extension AppModel {
-    /// Called when the scene becomes active again: reconnect if the ticket went
-    /// stale while we were backgrounded, then restart the poll loop.
-    func resumeLive() async {
-        guard selectedServer != nil else { return }
-        switch connection {
-        case .connected:
-            await refresh(silent: true)
-            startPolling()
-        case .needsTOTP:
-            break
-        default:
-            await connectAndRefresh()
         }
     }
 }
