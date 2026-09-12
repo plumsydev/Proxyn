@@ -1,0 +1,118 @@
+{
+  "canvases": {
+    "iphone": {
+      "width": 1284,
+      "height": 2778,
+      "top": 170,
+      "side": 100,
+      "bottom": 120,
+      "headlineSize": 100,
+      "sublineSize": 46,
+      "captionGap": 30,
+      "imageGap": 110,
+      "cornerRatio": 0.1416
+    },
+    "ipad": {
+      "width": 2064,
+      "height": 2752,
+      "top": 190,
+      "side": 150,
+      "bottom": 140,
+      "headlineSize": 108,
+      "sublineSize": 54,
+      "captionGap": 36,
+      "imageGap": 120,
+      "cornerRatio": 0.0174
+    }
+  },
+  "shots": {
+    "iphone": [
+      {
+        "input": "captures/iphone/01-overview.png",
+        "output": "screenshots/iphone-6.5/01-overview.png",
+        "headline": "Your whole cluster\nat a glance",
+        "subline": "CPU, memory, storage and alerts, updated live.",
+        "dark": false
+      },
+      {
+        "input": "captures/iphone/02-guest.png",
+        "output": "screenshots/iphone-6.5/02-guest.png",
+        "headline": "Start, stop and\nsnapshot in a tap",
+        "subline": "Full control of every VM and container.",
+        "dark": false
+      },
+      {
+        "input": "captures/iphone/03-charts.png",
+        "output": "screenshots/iphone-6.5/03-charts.png",
+        "headline": "Every metric, from\nlast hour to last year",
+        "subline": "Interactive charts for CPU, memory, network and load.",
+        "dark": false
+      },
+      {
+        "input": "captures/iphone/04-storage.png",
+        "output": "screenshots/iphone-6.5/04-storage.png",
+        "headline": "Know before\na disk fills up",
+        "subline": "Usage by node, with full storage flagged in red.",
+        "dark": false
+      },
+      {
+        "input": "captures/iphone/05-widgets.png",
+        "output": "screenshots/iphone-6.5/05-widgets.png",
+        "headline": "Live on your\nHome Screen",
+        "subline": "Cluster, guest, node and storage widgets.",
+        "dark": false
+      },
+      {
+        "input": "captures/iphone/06-dark.png",
+        "output": "screenshots/iphone-6.5/06-dark.png",
+        "headline": "Built for late-night\nmaintenance",
+        "subline": "Full dark mode, Dynamic Type and VoiceOver.",
+        "dark": true
+      }
+    ],
+    "ipad": [
+      {
+        "input": "captures/ipad/01-overview.png",
+        "output": "screenshots/ipad-13/01-overview.png",
+        "headline": "Your whole cluster at a glance",
+        "subline": "CPU, memory, storage and alerts, updated live.",
+        "dark": false
+      },
+      {
+        "input": "captures/ipad/02-guest.png",
+        "output": "screenshots/ipad-13/02-guest.png",
+        "headline": "Start, stop and snapshot in a tap",
+        "subline": "Full control of every VM and container.",
+        "dark": false
+      },
+      {
+        "input": "captures/ipad/03-charts.png",
+        "output": "screenshots/ipad-13/03-charts.png",
+        "headline": "Every metric,\nfrom last hour to last year",
+        "subline": "Interactive charts for CPU, memory, network and load.",
+        "dark": false
+      },
+      {
+        "input": "captures/ipad/04-storage.png",
+        "output": "screenshots/ipad-13/04-storage.png",
+        "headline": "Know before a disk fills up",
+        "subline": "Usage by node, with full storage flagged in red.",
+        "dark": false
+      },
+      {
+        "input": "captures/ipad/05-widgets.png",
+        "output": "screenshots/ipad-13/05-widgets.png",
+        "headline": "Live on your Home Screen",
+        "subline": "Cluster, guest, node and storage widgets.",
+        "dark": false
+      },
+      {
+        "input": "captures/ipad/06-dark.png",
+        "output": "screenshots/ipad-13/06-dark.png",
+        "headline": "Built for late-night maintenance",
+        "subline": "Full dark mode, Dynamic Type and VoiceOver.",
+        "dark": true
+      }
+    ]
+  }
+}
