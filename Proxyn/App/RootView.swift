@@ -1,28 +1,7 @@
 import SwiftUI
 
-enum AppTab: Int, CaseIterable, Identifiable, Hashable {
+enum AppTab: String, Hashable, CaseIterable {
     case overview, nodes, guests, storage, activity
-    var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .overview: return "Vue"
-        case .nodes: return "Nœuds"
-        case .guests: return "Instances"
-        case .storage: return "Stockage"
-        case .activity: return "Activité"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .overview: return "chart.bar.doc.horizontal.fill"
-        case .nodes: return "server.rack"
-        case .guests: return "cube.transparent.fill"
-        case .storage: return "internaldrive.fill"
-        case .activity: return "waveform.path.ecg"
-        }
-    }
 }
 
 struct RootView: View {
@@ -34,106 +13,107 @@ struct RootView: View {
             Group {
                 if model.servers.isEmpty {
                     OnboardingView()
-                        .transition(.opacity.combined(with: .scale(scale: 1.03)))
+                        .transition(.opacity)
                 } else {
-                    MainShell()
+                    MainTabView()
                         .transition(.opacity)
                 }
             }
-            .opacity(showSplash ? 0 : 1)
-            .scaleEffect(showSplash ? 0.97 : 1)
-            .animation(.easeOut(duration: 0.45), value: showSplash)
+            .animation(Motion.standard, value: model.servers.isEmpty)
 
             if showSplash {
-                SplashView { withAnimation(.easeOut(duration: 0.3)) { showSplash = false } }
-                    .transition(.opacity)
-                    .zIndex(10)
+                SplashView {
+                    withAnimation(.easeOut(duration: 0.25)) { showSplash = false }
+                }
+                .transition(.opacity)
+                .zIndex(1)
             }
         }
-        .animation(Motion.glide, value: model.servers.isEmpty)
         .task {
             guard !model.servers.isEmpty else { return }
-            await model.connectAndRefresh()
+            await model.connect()
         }
     }
 }
 
-struct MainShell: View {
+struct MainTabView: View {
     @Environment(AppModel.self) private var model
-    @State private var tab: AppTab = .overview
-    @State private var showServerSwitcher = false
-    @State private var showSettings = false
-    @State private var taskFocus: TaskFocus?
+    @SceneStorage("selectedTab") private var tab: AppTab = .overview
+    @State private var focusedTask: TaskFocus?
+    @State private var totpCode = ""
+
+    private var isAskingForTOTP: Binding<Bool> {
+        Binding(
+            get: { if case .needsTOTP = model.connection { return true } else { return false } },
+            set: { if !$0 { totpCode = "" } })
+    }
 
     var body: some View {
-        @Bindable var model = model
-
-        ZStack {
-            Palette.canvas.ignoresSafeArea()
-
-            // A plain TabView is UIKit-backed and swallows safe-area insets, so
-            // the floating bar would sit on top of the home indicator. Keeping
-            // the five stacks alive in a ZStack preserves per-tab navigation
-            // state and lets the bar be a real safe-area inset.
-            ForEach(AppTab.allCases) { item in
-                tabContent(item)
-                    .opacity(tab == item ? 1 : 0)
-                    .scaleEffect(tab == item ? 1 : 0.985)
-                    .allowsHitTesting(tab == item)
-                    .zIndex(tab == item ? 1 : 0)
+        TabView(selection: $tab) {
+            Tab("Overview", systemImage: "gauge.with.dots.needle.33percent", value: AppTab.overview) {
+                OverviewView()
             }
+            Tab("Nodes", systemImage: "server.rack", value: AppTab.nodes) {
+                NodesView()
+            }
+            Tab("Guests", systemImage: "square.stack.3d.up", value: AppTab.guests) {
+                GuestsView()
+            }
+            Tab("Storage", systemImage: "internaldrive", value: AppTab.storage) {
+                StorageView()
+            }
+            Tab("Activity", systemImage: "list.bullet.rectangle", value: AppTab.activity) {
+                ActivityView()
+            }
+            .badge(model.snapshot.runningTasks.count)
         }
-        .animation(.easeOut(duration: 0.18), value: tab)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            FloatingTabBar(selection: $tab)
+        .tabViewStyle(.sidebarAdaptable)
+        .onOpenURL { url in
+            guard let link = DeepLink(url: url) else { return }
+            switch link {
+            case .overview: tab = .overview
+            case .guest: tab = .guests
+            case .node: tab = .nodes
+            case .storage: tab = .storage
+            case .activity: tab = .activity
+            }
+            model.pendingDeepLink = link
         }
-        // Anchored to the bottom safe area (just above the tab bar) instead of
-        // the top, where it would sit on the navigation bar of pushed screens.
-        .overlay(alignment: .bottom) {
-            ToastStack(
+        .overlay(alignment: .top) {
+            ToastOverlay(
                 toasts: model.toasts,
                 onTap: { toast in
                     if let upid = toast.upid, let node = toast.node {
-                        taskFocus = TaskFocus(node: node, upid: upid, title: toast.title)
+                        focusedTask = TaskFocus(node: node, upid: upid, title: toast.title)
                     }
                     model.dismiss(toast)
                 },
                 onDismiss: { model.dismiss($0) })
-            .padding(.bottom, 8)
         }
-        .overlay {
-            if case .needsTOTP = model.connection {
-                TOTPPrompt()
-                    .transition(.opacity.combined(with: .scale(scale: 1.04)))
-                    .zIndex(5)
-            }
-        }
-        .sheet(isPresented: $showServerSwitcher) { ServerSwitcherSheet() }
-        .sheet(isPresented: $showSettings) { SettingsView() }
-        .sheet(item: $taskFocus) { focus in
+        .sheet(item: $focusedTask) { focus in
             NavigationStack {
                 TaskLogView(node: focus.node, upid: focus.upid, title: focus.title)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { focusedTask = nil }
+                        }
+                    }
             }
-            .presentationBackground(Palette.canvas)
         }
-        .animation(Motion.snap, value: model.connection)
-    }
-}
-
-extension MainShell {
-    @ViewBuilder
-    func tabContent(_ item: AppTab) -> some View {
-        switch item {
-        case .overview:
-            DashboardView(showServerSwitcher: $showServerSwitcher, showSettings: $showSettings)
-        case .nodes:
-            NodesView()
-        case .guests:
-            GuestsView()
-        case .storage:
-            StorageView()
-        case .activity:
-            ActivityView()
+        .alert("Two-Factor Authentication", isPresented: isAskingForTOTP) {
+            TextField("6-digit code", text: $totpCode)
+                .keyboardType(.numberPad)
+                .textContentType(.oneTimeCode)
+            Button("Verify") {
+                let code = totpCode
+                totpCode = ""
+                Task { await model.submitTOTP(code) }
+            }
+            Button("Cancel", role: .cancel) {
+                model.cancelTOTP()
+            }
+        } message: {
+            Text("Enter the code from your authenticator app for \(model.selectedServer?.fullUsername ?? "this account").")
         }
     }
 }
@@ -145,55 +125,43 @@ struct TaskFocus: Identifiable, Hashable {
     var title: String
 }
 
-/// Full-width bar with a material backdrop, a hairline top edge and a 2pt
-/// accent marker that slides to the active item. No pill, no outline, no glow —
-/// the colour change and the marker are the whole affordance.
-struct FloatingTabBar: View {
-    @Binding var selection: AppTab
-    @Namespace private var ns
+extension View {
+    /// Pushes the destination of a pending widget deep link onto this tab's
+    /// stack, once the snapshot it depends on has loaded.
+    func handlesDeepLinks(for tab: AppTab, path: Binding<NavigationPath>) -> some View {
+        modifier(DeepLinkHandler(tab: tab, path: path))
+    }
+}
 
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(AppTab.allCases) { item in
-                let isOn = item == selection
-                Button {
-                    guard !isOn else { return }
-                    Haptics.select()
-                    withAnimation(Motion.snap) { selection = item }
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: item.symbol)
-                            .font(.system(size: 17, weight: .regular))
-                            .symbolVariant(isOn ? .fill : .none)
-                            .foregroundStyle(isOn ? Palette.ember : Palette.inkTertiary)
-                            .frame(height: 20)
-                        Text(item.title)
-                            .font(.system(size: 10.5, weight: isOn ? .medium : .regular))
-                            .foregroundStyle(isOn ? Palette.ink : Palette.inkTertiary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 9)
-                    .padding(.bottom, 4)
-                    .overlay(alignment: .top) {
-                        if isOn {
-                            Capsule()
-                                .fill(Palette.ember)
-                                .frame(width: 18, height: 2)
-                                .matchedGeometryEffect(id: "tabMarker", in: ns)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .frame(height: 52)
-        .background {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(Rectangle().fill(Palette.canvas.opacity(0.45)))
-                .overlay(alignment: .top) { Divider1px() }
-                .ignoresSafeArea(edges: .bottom)
+private struct DeepLinkHandler: ViewModifier {
+    @Environment(AppModel.self) private var model
+    var tab: AppTab
+    @Binding var path: NavigationPath
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: model.pendingDeepLink, initial: true) { _, _ in resolve() }
+            .onChange(of: model.snapshot.capturedAt) { _, _ in resolve() }
+    }
+
+    private func resolve() {
+        guard let link = model.pendingDeepLink, owner(of: link) == tab else { return }
+        if case .overview = link { path = NavigationPath(); model.pendingDeepLink = nil; return }
+        if case .activity = link { path = NavigationPath(); model.pendingDeepLink = nil; return }
+        guard let route = model.route(for: link) else { return }
+        var fresh = NavigationPath()
+        fresh.append(route)
+        path = fresh
+        model.pendingDeepLink = nil
+    }
+
+    private func owner(of link: DeepLink) -> AppTab {
+        switch link {
+        case .overview: return .overview
+        case .guest: return .guests
+        case .node: return .nodes
+        case .storage: return .storage
+        case .activity: return .activity
         }
     }
 }
