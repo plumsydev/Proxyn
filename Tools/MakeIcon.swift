@@ -1,93 +1,103 @@
 import AppKit
 import CoreGraphics
 
-// Renders the Proxyn app icon (hexagon + rack bars on an ember gradient) at 1024².
+// Renders the Proxyn app icon at 1024×1024.
+//
+//   swift Tools/MakeIcon.swift <output.png> [default|dark|tinted]
+//
+// `default` is fully opaque with no alpha channel — App Store Connect rejects a
+// marketing icon that has one. `dark` and `tinted` use a transparent background
+// so iOS can draw its own, as the iOS 18 icon appearances expect.
+
+let arguments = CommandLine.arguments
+let output = arguments.count > 1 ? arguments[1] : "icon.png"
+let variant = arguments.count > 2 ? arguments[2] : "default"
+
 let size = 1024.0
-let cs = CGColorSpaceCreateDeviceRGB()
-guard let ctx = CGContext(data: nil, width: Int(size), height: Int(size),
-                          bitsPerComponent: 8, bytesPerRow: 0, space: cs,
-                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-    exit(1)
+let colorSpace = CGColorSpaceCreateDeviceRGB()
+let opaque = variant == "default"
+let alphaInfo: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
+
+guard let ctx = CGContext(data: nil, width: Int(size), height: Int(size), bitsPerComponent: 8,
+                          bytesPerRow: 0, space: colorSpace, bitmapInfo: alphaInfo.rawValue) else {
+    fatalError("Could not create a drawing context")
 }
 
-func color(_ hex: UInt32, _ a: CGFloat = 1) -> CGColor {
-    CGColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
-            green: CGFloat((hex >> 8) & 0xFF) / 255,
-            blue: CGFloat(hex & 0xFF) / 255, alpha: a)
+func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
+    CGColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
 }
 
-// Background: near-black with a single, very slight vertical lift. No radial
-// bloom — the icon has to read at 40pt on a Home Screen, not glow at 1024.
-ctx.setFillColor(color(0x0A0A0C))
-ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
+let strokeColor: CGColor
+let barColor: CGColor
 
-if let grad = CGGradient(colorsSpace: cs,
-                         colors: [color(0x16161A), color(0x0A0A0C)] as CFArray,
-                         locations: [0, 1]) {
-    ctx.drawLinearGradient(grad,
-                           start: CGPoint(x: 0, y: size),
-                           end: CGPoint(x: 0, y: 0),
-                           options: [])
+switch variant {
+case "tinted":
+    strokeColor = color(0xFFFFFF)
+    barColor = color(0xFFFFFF, 0.72)
+case "dark":
+    strokeColor = color(0xFF8A3D)
+    barColor = color(0xECECEF)
+default:
+    if let gradient = CGGradient(colorsSpace: colorSpace,
+                                 colors: [color(0x1B1B20), color(0x0B0B0D)] as CFArray,
+                                 locations: [0, 1]) {
+        ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: size), end: .zero, options: [])
+    }
+    strokeColor = color(0xFF8A3D)
+    barColor = color(0xECECEF)
 }
 
-// Hexagon outline, flat accent.
+// Hexagon
 let center = CGPoint(x: size / 2, y: size / 2)
 let radius = size * 0.315
-let lineWidth = size * 0.052
 let corner = radius * 0.16
 
-func hexPath(radius: CGFloat) -> CGPath {
-    let path = CGMutablePath()
-    var pts: [CGPoint] = []
-    for i in 0..<6 {
-        let angle = Double(i) * .pi / 3 + .pi / 2
-        pts.append(CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle)))
-    }
-    for i in 0..<6 {
-        let cur = pts[i], next = pts[(i + 1) % 6], prev = pts[(i + 5) % 6]
-        func unit(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
-            let dx = b.x - a.x, dy = b.y - a.y
-            let l = max(sqrt(dx * dx + dy * dy), 0.0001)
-            return CGPoint(x: dx / l, y: dy / l)
-        }
-        let toPrev = unit(cur, prev), toNext = unit(cur, next)
-        let start = CGPoint(x: cur.x + toPrev.x * corner, y: cur.y + toPrev.y * corner)
-        let end = CGPoint(x: cur.x + toNext.x * corner, y: cur.y + toNext.y * corner)
-        if i == 0 { path.move(to: start) } else { path.addLine(to: start) }
-        path.addQuadCurve(to: end, control: cur)
-    }
-    path.closeSubpath()
-    return path
+let hexagon = CGMutablePath()
+let vertices: [CGPoint] = (0..<6).map { i in
+    let angle = Double(i) * .pi / 3 + .pi / 2
+    return CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
 }
+func unit(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
+    let dx = b.x - a.x, dy = b.y - a.y
+    let length = max(sqrt(dx * dx + dy * dy), 0.0001)
+    return CGPoint(x: dx / length, y: dy / length)
+}
+for i in 0..<6 {
+    let current = vertices[i], next = vertices[(i + 1) % 6], previous = vertices[(i + 5) % 6]
+    let toPrevious = unit(current, previous), toNext = unit(current, next)
+    let start = CGPoint(x: current.x + toPrevious.x * corner, y: current.y + toPrevious.y * corner)
+    let end = CGPoint(x: current.x + toNext.x * corner, y: current.y + toNext.y * corner)
+    if i == 0 { hexagon.move(to: start) } else { hexagon.addLine(to: start) }
+    hexagon.addQuadCurve(to: end, control: current)
+}
+hexagon.closeSubpath()
 
-ctx.addPath(hexPath(radius: radius))
-ctx.setLineWidth(lineWidth)
+ctx.addPath(hexagon)
+ctx.setLineWidth(size * 0.055)
 ctx.setLineJoin(.round)
-ctx.setLineCap(.round)
-ctx.setStrokeColor(color(0xFF7A33))
+ctx.setStrokeColor(strokeColor)
 ctx.strokePath()
 
-// Three rack bars.
-let barHeight = size * 0.045
+// Rack units
+let barHeight = size * 0.048
 let widths: [CGFloat] = [0.30, 0.20, 0.26]
 let gap = size * 0.075
 let totalHeight = barHeight * 3 + gap * 2
+let left = center.x - size * 0.30 / 2
 var y = center.y + totalHeight / 2 - barHeight
 
-ctx.setFillColor(color(0xECECEF))
-let barLeft = center.x - size * 0.30 / 2
-for w in widths {
-    let width = size * w
-    let rect = CGRect(x: barLeft, y: y, width: width, height: barHeight)
-    ctx.addPath(CGPath(roundedRect: rect, cornerWidth: barHeight / 2,
-                       cornerHeight: barHeight / 2, transform: nil))
+ctx.setFillColor(barColor)
+for width in widths {
+    let rect = CGRect(x: left, y: y, width: size * width, height: barHeight)
+    ctx.addPath(CGPath(roundedRect: rect, cornerWidth: barHeight / 2, cornerHeight: barHeight / 2, transform: nil))
     ctx.fillPath()
     y -= barHeight + gap
 }
 
-guard let image = ctx.makeImage() else { exit(1) }
-let rep = NSBitmapImageRep(cgImage: image)
-guard let data = rep.representation(using: .png, properties: [:]) else { exit(1) }
-let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon.png"
-try data.write(to: URL(fileURLWithPath: out))
-print("wrote \(out)")
+guard let image = ctx.makeImage(),
+      let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+    fatalError("Could not encode the icon")
+}
+try data.write(to: URL(fileURLWithPath: output))
+print("\(variant) → \(output)")
