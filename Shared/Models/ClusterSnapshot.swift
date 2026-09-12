@@ -1,119 +1,142 @@
 import Foundation
 
-/// Everything one poll of a server produces. The UI only ever reads a snapshot,
-/// which makes partial failures easy: a stale snapshot stays on screen while the
-/// error banner explains what broke.
+/// Everything one poll of a server produces.
+///
+/// All derived collections and aggregates are computed **once**, when the
+/// snapshot is built, instead of on every property access. Views read these
+/// many times per frame, and a large cluster has hundreds of guests.
 struct ClusterSnapshot: Sendable, Equatable {
-    var resources: [PVEResource] = []
-    var clusterNodes: [PVEClusterNodeStatus] = []
-    var tasks: [PVETask] = []
-    var version: PVEVersion?
-    var capturedAt: Date = .distantPast
-    var isPartial: Bool = false
+    let resources: [PVEResource]
+    let clusterNodes: [PVEClusterNodeStatus]
+    let tasks: [PVETask]
+    let version: PVEVersion?
+    let capturedAt: Date
 
-    var nodes: [PVEResource] { resources.filter { $0.type == .node } }
+    let nodes: [PVEResource]
+    let onlineNodes: [PVEResource]
+    let offlineNodes: [PVEResource]
+    let guests: [PVEResource]
+    let runningGuests: [PVEResource]
+    let stoppedGuests: [PVEResource]
+    let templates: [PVEResource]
+    let storages: [PVEResource]
+    let uniqueStorages: [PVEResource]
+    let runningTasks: [PVETask]
+    let failedTasks: [PVETask]
 
-    var guests: [PVEResource] {
-        resources.filter { $0.type.isGuest }.sorted { ($0.vmid ?? 0) < ($1.vmid ?? 0) }
-    }
+    let aggregateCPU: Double
+    let totalCores: Double
+    let memoryUsed: Double
+    let memoryTotal: Double
+    let storageUsed: Double
+    let storageTotal: Double
 
-    var storages: [PVEResource] { resources.filter { $0.type == .storage } }
+    let isQuorate: Bool
+    let clusterName: String?
+    let alerts: [ClusterAlert]
 
-    var pools: [String] {
-        Array(Set(resources.compactMap(\.pool).filter { !$0.isEmpty })).sorted()
-    }
-
-    var allTags: [String] {
-        Array(Set(guests.flatMap(\.tags))).sorted()
-    }
-
-    var runningGuests: [PVEResource] { guests.filter { $0.state.isUp && !$0.isTemplate } }
-    var stoppedGuests: [PVEResource] { guests.filter { !$0.state.isUp && !$0.isTemplate } }
-    var templates: [PVEResource] { guests.filter(\.isTemplate) }
-
-    var onlineNodes: [PVEResource] { nodes.filter { $0.state.isUp } }
-    var offlineNodes: [PVEResource] { nodes.filter { !$0.state.isUp } }
-
-    var isQuorate: Bool {
-        guard let cluster = clusterNodes.first(where: { $0.type == "cluster" }) else { return true }
-        return cluster.quorate ?? true
-    }
-
-    var clusterName: String? {
-        clusterNodes.first(where: { $0.type == "cluster" })?.name
-    }
-
-    // MARK: Aggregates
-
-    /// CPU load across the cluster, weighted by each node's core count so a
-    /// 4-core node doesn't skew a 64-core one.
-    var aggregateCPU: Double {
-        let online = onlineNodes
-        let totalCores = online.reduce(0.0) { $0 + ($1.maxcpu ?? 1) }
-        guard totalCores > 0 else { return 0 }
-        let used = online.reduce(0.0) { $0 + ($1.cpu ?? 0) * ($1.maxcpu ?? 1) }
-        return max(0, min(1, used / totalCores))
-    }
-
-    var totalCores: Double { onlineNodes.reduce(0) { $0 + ($1.maxcpu ?? 0) } }
-
-    var memoryUsed: Double { onlineNodes.reduce(0) { $0 + ($1.mem ?? 0) } }
-    var memoryTotal: Double { onlineNodes.reduce(0) { $0 + ($1.maxmem ?? 0) } }
     var aggregateMemory: Double { memoryTotal > 0 ? memoryUsed / memoryTotal : 0 }
-
-    /// Shared storages are counted once even when every node reports them.
-    var storageUsed: Double { uniqueStorages.reduce(0) { $0 + ($1.disk ?? 0) } }
-    var storageTotal: Double { uniqueStorages.reduce(0) { $0 + ($1.maxdisk ?? 0) } }
     var aggregateStorage: Double { storageTotal > 0 ? storageUsed / storageTotal : 0 }
+    var isEmpty: Bool { capturedAt == .distantPast }
 
-    var uniqueStorages: [PVEResource] {
+    static let empty = ClusterSnapshot()
+
+    init(resources: [PVEResource] = [],
+         clusterNodes: [PVEClusterNodeStatus] = [],
+         tasks: [PVETask] = [],
+         version: PVEVersion? = nil,
+         capturedAt: Date = .distantPast,
+         now: Date = Date()) {
+        self.resources = resources
+        self.clusterNodes = clusterNodes
+        self.tasks = tasks
+        self.version = version
+        self.capturedAt = capturedAt
+
+        let nodes = resources.filter { $0.type == .node }
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        let online = nodes.filter { $0.state.isUp }
+        let guests = resources.filter { $0.type.isGuest }.sorted { ($0.vmid ?? 0) < ($1.vmid ?? 0) }
+        let storages = resources.filter { $0.type == .storage }
+
+        self.nodes = nodes
+        self.onlineNodes = online
+        self.offlineNodes = nodes.filter { !$0.state.isUp }
+        self.guests = guests
+        self.runningGuests = guests.filter { $0.state.isUp && !$0.isTemplate }
+        self.stoppedGuests = guests.filter { !$0.state.isUp && !$0.isTemplate }
+        self.templates = guests.filter(\.isTemplate)
+        self.storages = storages
+        self.uniqueStorages = Self.deduplicate(storages)
+        self.runningTasks = tasks.filter(\.isRunning)
+        self.failedTasks = tasks.filter(\.failed)
+
+        // CPU weighted by core count, so a 4-core node doesn't skew a 64-core one.
+        let cores = online.reduce(0.0) { $0 + ($1.maxcpu ?? 0) }
+        let busyCores = online.reduce(0.0) { $0 + ($1.cpu ?? 0) * ($1.maxcpu ?? 0) }
+        self.totalCores = cores
+        self.aggregateCPU = cores > 0 ? max(0, min(1, busyCores / cores)) : 0
+        self.memoryUsed = online.reduce(0) { $0 + ($1.mem ?? 0) }
+        self.memoryTotal = online.reduce(0) { $0 + ($1.maxmem ?? 0) }
+        self.storageUsed = uniqueStorages.reduce(0) { $0 + ($1.disk ?? 0) }
+        self.storageTotal = uniqueStorages.reduce(0) { $0 + ($1.maxdisk ?? 0) }
+
+        let cluster = clusterNodes.first { $0.type == "cluster" }
+        self.isQuorate = cluster?.quorate ?? true
+        self.clusterName = cluster?.name
+
+        self.alerts = Self.makeAlerts(nodes: nodes, guests: guests, storages: uniqueStorages,
+                                      tasks: tasks, isQuorate: cluster?.quorate ?? true, now: now)
+    }
+
+    /// Shared storages are reported once per node; count them once.
+    private static func deduplicate(_ storages: [PVEResource]) -> [PVEResource] {
         var seen = Set<String>()
         var out: [PVEResource] = []
-        for s in storages where s.status != "unavailable" {
-            let key = s.shared ? (s.storage ?? s.id) : s.id
-            if seen.insert(key).inserted { out.append(s) }
+        for storage in storages where storage.status != "unavailable" {
+            let key = storage.shared ? (storage.storage ?? storage.id) : storage.id
+            if seen.insert(key).inserted { out.append(storage) }
         }
-        return out
+        return out.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 
-    var runningTasks: [PVETask] { tasks.filter(\.isRunning) }
-    var failedTasks: [PVETask] { tasks.filter(\.failed) }
-
-    /// Health issues worth surfacing at the top of the dashboard.
-    var alerts: [ClusterAlert] {
+    private static func makeAlerts(nodes: [PVEResource], guests: [PVEResource],
+                                   storages: [PVEResource], tasks: [PVETask],
+                                   isQuorate: Bool, now: Date) -> [ClusterAlert] {
         var out: [ClusterAlert] = []
+
         if !isQuorate {
-            out.append(.init(level: .critical, symbol: "exclamationmark.octagon.fill",
-                             title: "Quorum perdu",
-                             detail: "Le cluster n'a plus le quorum : les actions sont bloquées."))
+            out.append(.init(id: "quorum", level: .critical, symbol: "exclamationmark.octagon",
+                             title: "Cluster has lost quorum",
+                             detail: "Configuration changes are blocked until quorum is restored."))
         }
-        for node in offlineNodes {
-            out.append(.init(level: .critical, symbol: "bolt.horizontal.circle.fill",
-                             title: "Nœud \(node.displayName) hors ligne",
-                             detail: "Aucune réponse du nœud."))
+        for node in nodes where !node.state.isUp {
+            out.append(.init(id: "node-offline-\(node.id)", level: .critical, symbol: "server.rack",
+                             title: "\(node.displayName) is offline",
+                             detail: "The node isn't responding to the cluster."))
         }
-        for storage in uniqueStorages where storage.diskFraction > 0.9 {
-            out.append(.init(level: .warning, symbol: "internaldrive.fill",
-                             title: "Stockage \(storage.displayName) à \(Format.percent(storage.diskFraction))",
-                             detail: "Il reste \(Format.bytes((storage.maxdisk ?? 0) - (storage.disk ?? 0)))."))
+        for storage in storages where storage.diskFraction >= 0.9 {
+            let free = Format.bytes((storage.maxdisk ?? 0) - (storage.disk ?? 0))
+            out.append(.init(id: "storage-full-\(storage.id)", level: .warning, symbol: "internaldrive",
+                             title: "\(storage.displayName) is \(Format.percent(storage.diskFraction)) full",
+                             detail: "\(free) remaining."))
         }
-        for node in onlineNodes where node.memFraction > 0.92 {
-            out.append(.init(level: .warning, symbol: "memorychip.fill",
-                             title: "RAM saturée sur \(node.displayName)",
-                             detail: "\(Format.percent(node.memFraction)) de la mémoire utilisée."))
+        for node in nodes where node.state.isUp && node.memFraction >= 0.92 {
+            out.append(.init(id: "node-memory-\(node.id)", level: .warning, symbol: "memorychip",
+                             title: "\(node.displayName) is low on memory",
+                             detail: "\(Format.percent(node.memFraction)) of RAM in use."))
         }
-        for guest in guests where guest.lock != nil && !(guest.lock ?? "").isEmpty {
-            out.append(.init(level: .info, symbol: "lock.fill",
-                             title: "\(guest.displayName) verrouillé",
-                             detail: "Verrou : \(guest.lock ?? "")"))
-        }
-        let recentFailures = failedTasks.prefix(3)
+        // Only failures from the last day: the cluster task log keeps old ones
+        // around for a long time, and a permanent alert is one nobody reads.
+        let recentFailures = tasks
+            .filter { $0.failed && ($0.end ?? $0.start ?? .distantPast) > now.addingTimeInterval(-86_400) }
+            .prefix(3)
         for task in recentFailures {
-            out.append(.init(level: .warning, symbol: "xmark.octagon.fill",
-                             title: "\(Format.taskType(task.type)) en échec",
-                             detail: task.exitStatus ?? "Terminée en erreur"))
+            out.append(.init(id: "task-\(task.upid)", level: .warning, symbol: "xmark.octagon",
+                             title: "\(Format.taskType(task.type)) failed",
+                             detail: task.exitStatus ?? "The task ended with an error."))
         }
-        return out
+        return out.sorted { $0.level > $1.level }
     }
 }
 
@@ -122,35 +145,33 @@ struct ClusterAlert: Identifiable, Hashable, Sendable {
         case info, warning, critical
         static func < (a: Level, b: Level) -> Bool { a.rawValue < b.rawValue }
     }
-    var id = UUID()
-    var level: Level
-    var symbol: String
-    var title: String
-    var detail: String
+
+    /// Derived from what the alert is about, never random — a fresh UUID on
+    /// every poll would make SwiftUI treat each alert as new and re-animate it.
+    let id: String
+    let level: Level
+    let symbol: String
+    let title: String
+    let detail: String
 }
 
-/// Rolling window of aggregate values, refreshed at the poll interval. This is
-/// what makes the dashboard feel live between RRD updates (Proxmox only writes
-/// RRD every minute).
+/// Rolling window of values sampled at the poll interval. Proxmox writes RRD
+/// data once a minute; this is what keeps the UI moving between writes.
 struct LiveHistory: Sendable, Equatable {
     private(set) var cpu: [Double] = []
     private(set) var memory: [Double] = []
     private(set) var netIn: [Double] = []
     private(set) var netOut: [Double] = []
-    private(set) var stamps: [Date] = []
     var capacity = 90
 
-    mutating func append(cpu c: Double, memory m: Double, netIn i: Double, netOut o: Double, at date: Date = Date()) {
-        cpu.append(c); memory.append(m); netIn.append(i); netOut.append(o); stamps.append(date)
+    mutating func append(cpu c: Double, memory m: Double, netIn i: Double = 0, netOut o: Double = 0) {
+        cpu.append(c); memory.append(m); netIn.append(i); netOut.append(o)
         if cpu.count > capacity {
-            cpu.removeFirst(); memory.removeFirst(); netIn.removeFirst()
-            netOut.removeFirst(); stamps.removeFirst()
+            cpu.removeFirst(); memory.removeFirst(); netIn.removeFirst(); netOut.removeFirst()
         }
     }
 
-    mutating func reset() {
-        cpu = []; memory = []; netIn = []; netOut = []; stamps = []
-    }
+    mutating func reset() { self = LiveHistory(capacity: capacity) }
 
     var isEmpty: Bool { cpu.isEmpty }
 }
