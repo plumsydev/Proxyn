@@ -1,13 +1,11 @@
 import SwiftUI
 
-/// Inline trend line, drawn with Canvas so a long list can carry one per row.
-/// Hairline weight and no fill by default — at this size a filled area is a
-/// smudge, not information.
+/// Inline trend line drawn with Canvas — cheap enough for every row of a list.
 struct Sparkline: View {
     var values: [Double]
-    var tint: Color = Palette.ember
+    var tint: Color = Palette.accent
     var filled: Bool = false
-    var lineWidth: CGFloat = 1.3
+    var lineWidth: CGFloat = 1.5
     /// Normalise against this instead of the series' own maximum.
     var referenceMax: Double? = nil
 
@@ -18,7 +16,7 @@ struct Sparkline: View {
             let hi = referenceMax ?? (values.max() ?? 1)
             let span = hi - lo
             let stepX = size.width / CGFloat(values.count - 1)
-            let inset = lineWidth / 2 + 0.5
+            let inset = lineWidth
 
             func point(_ i: Int) -> CGPoint {
                 let normalized = span < 0.000_001 ? 0.5 : (values[i] - lo) / span
@@ -29,10 +27,8 @@ struct Sparkline: View {
             var line = Path()
             line.move(to: point(0))
             for i in 1..<values.count {
-                let p = point(i)
-                let prev = point(i - 1)
-                let mid = CGPoint(x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2)
-                line.addQuadCurve(to: mid, control: prev)
+                let p = point(i), prev = point(i - 1)
+                line.addQuadCurve(to: CGPoint(x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2), control: prev)
                 if i == values.count - 1 { line.addLine(to: p) }
             }
 
@@ -42,13 +38,13 @@ struct Sparkline: View {
                 area.addLine(to: CGPoint(x: 0, y: size.height))
                 area.closeSubpath()
                 context.fill(area, with: .linearGradient(
-                    Gradient(colors: [tint.opacity(0.16), tint.opacity(0.0)]),
+                    Gradient(colors: [tint.opacity(0.18), tint.opacity(0)]),
                     startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
             }
 
             context.stroke(line, with: .color(tint),
                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
         }
-        .drawingGroup()
+        .accessibilityHidden(true)
     }
 }
