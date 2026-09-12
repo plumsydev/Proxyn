@@ -108,7 +108,7 @@
 		13416471E9549CB0606DE7F8 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		1B0ADC1A72F3EF0E98867AFA /* ProxmoxAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxmoxAPI.swift; sourceTree = "<group>"; };
 		1C7D22AC7B3292ADE3E0A9A8 /* ProxynApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxynApp.swift; sourceTree = "<group>"; };
-		1D1624C120F103399A7639BC /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1D1624C120F103399A7639BC /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		1E1145DF8E0D1BE550F03734 /* ServerProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerProfile.swift; sourceTree = "<group>"; };
 		21F66338EC8416A446BFE1FB /* ClusterSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClusterSnapshot.swift; sourceTree = "<group>"; };
 		248943600F2829A1B26DD85F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -127,13 +127,13 @@
 		752CE6EDDF7309EEE4281818 /* Rows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Rows.swift; sourceTree = "<group>"; };
 		772282710915220053D7F236 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
 		774CFD0D62724E7B0CDA4A20 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		78841F2D3D5B4B510E08E41C /* ProxynWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ProxynWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		78841F2D3D5B4B510E08E41C /* ProxynWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ProxynWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		831A93D49EFFCC239C24CCB2 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
 		951F9E895962676F05030913 /* NodeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeDetailView.swift; sourceTree = "<group>"; };
 		97AB77BBAE6BA07526216DB3 /* TLSDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TLSDelegate.swift; sourceTree = "<group>"; };
 		9A48B6FAEE397AF6A7FFA5C3 /* MetricChart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricChart.swift; sourceTree = "<group>"; };
 		9F035B024D1C2E19CABDB15D /* GuestWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestWidget.swift; sourceTree = "<group>"; };
-		9F860E5584A9D593AB89E824 /* Proxyn.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Proxyn.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F860E5584A9D593AB89E824 /* Proxyn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Proxyn.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A0A2B030C46FBC7C1309FECB /* InfrastructureWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfrastructureWidgets.swift; sourceTree = "<group>"; };
 		A33466E3D24D05619BB28C66 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A827ECB28B12D9C7FA479FE9 /* StorageDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageDetailView.swift; sourceTree = "<group>"; };
@@ -144,7 +144,7 @@
 		C73C10865FDECED9BD619145 /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
 		C73F093010438DE8A1943282 /* WidgetData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetData.swift; sourceTree = "<group>"; };
 		C8F3ED3F591DE3AB0366628E /* DemoBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoBackend.swift; sourceTree = "<group>"; };
-		CAFBF5F7D22F1C3B13FF9E1E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		CAFBF5F7D22F1C3B13FF9E1E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		CCFE2F76555F5B942A428235 /* Metrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Metrics.swift; sourceTree = "<group>"; };
 		D119F63CE26A07BE25F480A0 /* SharedSnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedSnapshotStore.swift; sourceTree = "<group>"; };
 		D6D5C96FDC47C873F45E2276 /* TaskLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskLogView.swift; sourceTree = "<group>"; };
@@ -459,11 +459,9 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					02AFD2EAD5C8D09EAA79DF72 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 					0D4EAE9E417EEA574A04C23C = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -677,6 +675,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Proxyn/Resources/Proxyn.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 7XK9TC66R8;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = Proxyn/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -764,6 +763,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ProxynWidgets/ProxynWidgets.entitlements;
+				DEVELOPMENT_TEAM = 7XK9TC66R8;
 				INFOPLIST_FILE = ProxynWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -785,6 +785,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Proxyn/Resources/Proxyn.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 7XK9TC66R8;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = Proxyn/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -805,6 +806,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ProxynWidgets/ProxynWidgets.entitlements;
+				DEVELOPMENT_TEAM = 7XK9TC66R8;
 				INFOPLIST_FILE = ProxynWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
