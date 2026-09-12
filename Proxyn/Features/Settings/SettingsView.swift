@@ -3,221 +3,173 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var editingServer: ServerProfile?
-    @State private var showSwitcher = false
 
     var body: some View {
-        @Bindable var model = model
-
         NavigationStack {
-            ZStack {
-                Palette.sheetCanvas.ignoresSafeArea()
+            Form {
+                serverSection
 
-                ScrollView {
-                    VStack(spacing: 15) {
-                        serverCard
-                        refreshCard
-                        behaviourCard
-                        aboutCard
+                Section {
+                    Picker("Refresh Every", selection: binding(\.refreshInterval)) {
+                        Text("2 seconds").tag(2.0)
+                        Text("5 seconds").tag(5.0)
+                        Text("10 seconds").tag(10.0)
+                        Text("30 seconds").tag(30.0)
                     }
-                    .padding(18)
-                    .padding(.bottom, 30)
+                } header: {
+                    Text("Live Updates")
+                } footer: {
+                    Text("Proxyn only polls while it's open. Shorter intervals make charts smoother but put more load on the server.")
                 }
-                .scrollIndicators(.hidden)
+
+                Section("Appearance") {
+                    Picker("Theme", selection: binding(\.appearance)) {
+                        ForEach(AppearancePreference.allCases) { Text($0.title).tag($0) }
+                    }
+                }
+
+                Section {
+                    Toggle("Confirm Before Stopping Guests", isOn: binding(\.confirmDestructiveActions))
+                    Toggle("Show Templates", isOn: binding(\.showTemplates))
+                    Toggle("Haptic Feedback", isOn: binding(\.hapticsEnabled))
+                } header: {
+                    Text("Behavior")
+                } footer: {
+                    Text("Deleting guests, backups and snapshots always asks for confirmation.")
+                }
+
+                Section {
+                    LabeledContent("Version", value: "\(Bundle.main.appVersion) (\(Bundle.main.appBuild))")
+                } header: {
+                    Text("About")
+                } footer: {
+                    Text("Proxyn talks directly to your Proxmox VE servers. No data is sent to any other service, and credentials are stored in the Keychain on this device.\n\nProxmox is a registered trademark of Proxmox Server Solutions GmbH. Proxyn is an independent app and isn't affiliated with or endorsed by Proxmox.")
+                }
             }
-            .navigationTitle("Réglages")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("OK") { dismiss() }.foregroundStyle(Palette.ember)
+                    Button("Done") { dismiss() }
                 }
+            }
+            .navigationDestination(for: Route.self) { route in
+                if case .servers = route { ServerListView() }
             }
         }
-        .presentationBackground(Palette.sheetCanvas)
-        .sheet(item: $editingServer) { AddServerView(editing: $0) }
-        .sheet(isPresented: $showSwitcher) { ServerSwitcherSheet() }
     }
 
-    private var serverCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 13) {
-                SectionLabel("Serveur actif")
-
-                if let server = model.selectedServer {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(server.displayName)
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(Palette.ink)
-                        Text(server.subtitleLine)
-                            .font(.mono(11.5))
-                            .foregroundStyle(Palette.inkTertiary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    HStack(spacing: 9) {
-                        Button("Modifier") { editingServer = server }
-                            .buttonStyle(QuietButtonStyle(tint: Palette.ink, fullWidth: true))
-                        Button("Changer") { showSwitcher = true }
-                            .buttonStyle(QuietButtonStyle(tint: Palette.ember, fullWidth: true))
-                    }
-
-                    Divider1px()
-
-                    DetailRow(label: "État",
-                              value: connectionLabel,
-                              valueColor: model.connection.isConnected ? Palette.mint : Palette.rose)
-                    if let version = model.snapshot.version {
-                        DetailRow(label: "Proxmox VE",
-                                  value: "\(version.version ?? "?") (\(version.release ?? "—"))")
-                    }
-                    DetailRow(label: "Dernier relevé",
-                              value: model.snapshot.capturedAt == .distantPast
-                              ? "—" : Format.clock(model.snapshot.capturedAt), monospaced: true)
-
-                    Button {
-                        Task { await model.connectAndRefresh(reset: true) }
-                    } label: {
-                        Label("Reconnecter", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(QuietButtonStyle(tint: Palette.ember, fullWidth: true))
-                } else {
-                    Text("Aucun serveur configuré.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.inkTertiary)
+    @ViewBuilder
+    private var serverSection: some View {
+        Section("Server") {
+            if let server = model.selectedServer {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(server.displayName)
+                    Text(server.isDemo ? "Demo data" : server.addressLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("Status", value: connectionLabel)
+                if let version = model.snapshot.version?.version {
+                    LabeledContent("Proxmox VE", value: version)
                 }
             }
+            NavigationLink("Manage Servers", value: Route.servers)
         }
     }
 
     private var connectionLabel: String {
         switch model.connection {
-        case .connected: return "Connecté"
-        case .connecting: return "Connexion…"
-        case .needsTOTP: return "2FA requise"
-        case .failed: return "Erreur"
-        case .idle: return "Inactif"
+        case .connected: return "Connected"
+        case .connecting: return "Connecting…"
+        case .needsTOTP: return "Waiting for code"
+        case .failed: return "Not connected"
+        case .idle: return "Idle"
         }
     }
 
-    private var refreshCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
-                SectionLabel("Temps réel")
+    private func binding<Value: Equatable>(_ keyPath: WritableKeyPath<AppSettings, Value>) -> Binding<Value> {
+        Binding(
+            get: { model.settings[keyPath: keyPath] },
+            set: { value in model.update { $0[keyPath: keyPath] = value } })
+    }
+}
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label("Intervalle de rafraîchissement", systemImage: "timer")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Palette.ink)
-                        Spacer()
-                        Text("\(Int(model.settings.liveRefreshInterval)) s")
-                            .font(.metric(15))
-                            .foregroundStyle(Palette.ember)
-                            .contentTransition(.numericText())
+/// Add, edit, select and remove servers.
+struct ServerListView: View {
+    @Environment(AppModel.self) private var model
+    @State private var editing: ServerProfile?
+    @State private var adding = false
+    @State private var pendingDelete: ServerProfile?
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(model.servers) { server in
+                    Button {
+                        model.selectServer(server)
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(server.displayName)
+                                    .foregroundStyle(.primary)
+                                Text(server.isDemo ? "Demo data" : "\(server.addressLine) · \(server.identityLine)")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer(minLength: 8)
+                            if server.id == model.selectedServer?.id {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Palette.accent)
+                                    .accessibilityLabel("Selected")
+                            }
+                        }
                     }
-                    Slider(value: Binding(
-                        get: { model.settings.liveRefreshInterval },
-                        set: { value in
-                            model.update { $0.liveRefreshInterval = value }
-                        }), in: 2...30, step: 1)
-                    .tint(Palette.ember)
-                    .onChange(of: model.settings.liveRefreshInterval) { _, _ in
-                        model.startPolling()
+                    .swipeActions {
+                        Button("Delete", systemImage: "trash") { pendingDelete = server }
+                            .tint(Palette.critical)
+                        if !server.isDemo {
+                            Button("Edit", systemImage: "pencil") { editing = server }
+                        }
                     }
-                    Text("Un intervalle court donne des graphes plus fluides mais sollicite davantage le cluster et la batterie.")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Palette.inkTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .contextMenu {
+                        if !server.isDemo {
+                            Button("Edit", systemImage: "pencil") { editing = server }
+                        }
+                        Button("Delete", systemImage: "trash", role: .destructive) { pendingDelete = server }
+                    }
                 }
-
-                Divider1px()
-
-                ToggleRow(title: "Continuer en arrière-plan",
-                          subtitle: "Reprend le suivi dès le retour dans l'app.",
-                          isOn: Binding(
-                            get: { model.settings.backgroundRefreshEnabled },
-                            set: { value in model.update { $0.backgroundRefreshEnabled = value } }))
+            } footer: {
+                Text("Tap a server to switch to it. Swipe to edit or delete.")
             }
-        }
-    }
 
-    private var behaviourCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionLabel("Comportement")
-
-                ToggleRow(title: "Retours haptiques",
-                          subtitle: "Vibrations sur les actions et les changements d'état.",
-                          isOn: Binding(
-                            get: { model.settings.hapticsEnabled },
-                            set: { value in model.update { $0.hapticsEnabled = value } }))
-
-                Divider1px()
-
-                ToggleRow(title: "Confirmer les actions risquées",
-                          subtitle: "Demande une confirmation avant un arrêt forcé ou un reset.",
-                          isOn: Binding(
-                            get: { model.settings.confirmDestructiveActions },
-                            set: { value in model.update { $0.confirmDestructiveActions = value } }))
-
-                Divider1px()
-
-                ToggleRow(title: "Afficher les modèles",
-                          subtitle: "Inclut les templates dans la liste des instances.",
-                          isOn: Binding(
-                            get: { model.settings.showTemplates },
-                            set: { value in model.update { $0.showTemplates = value } }))
-
-                Divider1px()
-
-                ToggleRow(title: "Lignes compactes",
-                          subtitle: "Masque les étiquettes et les mini-graphes dans les listes.",
-                          isOn: Binding(
-                            get: { model.settings.compactGuestRows },
-                            set: { value in model.update { $0.compactGuestRows = value } }))
-            }
-        }
-    }
-
-    private var aboutCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionLabel("À propos")
-
-                HStack(spacing: 14) {
-                    ProxynMark(size: 36)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Proxyn")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(Palette.ink)
-                        Text("version \(Bundle.main.appVersion) (\(Bundle.main.appBuild))")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Palette.inkTertiary)
+            Section {
+                Button("Add Server", systemImage: "plus") { adding = true }
+                if !model.servers.contains(where: \.isDemo) {
+                    Button("Add Demo Cluster", systemImage: "play.rectangle") {
+                        model.addServer(.demo())
                     }
-                    Spacer(minLength: 0)
                 }
-
-                Divider1px()
-
-                Text("Proxyn communique directement avec l'API Proxmox VE de vos serveurs. Aucune donnée ne transite par un service tiers, et les identifiants restent dans le Trousseau de l'appareil.")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Palette.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                DetailRow(label: "Instances suivies", value: "\(model.snapshot.guests.count)")
-                DetailRow(label: "Nœuds", value: "\(model.snapshot.nodes.count)")
-                DetailRow(label: "Serveurs enregistrés", value: "\(model.servers.count)")
             }
+        }
+        .navigationTitle("Servers")
+        .sheet(isPresented: $adding) { AddServerView() }
+        .sheet(item: $editing) { AddServerView(editing: $0) }
+        .confirmationDialog("Delete \(pendingDelete?.displayName ?? "server")?",
+                            isPresented: Binding(get: { pendingDelete != nil },
+                                                 set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible,
+                            presenting: pendingDelete) { server in
+            Button("Delete", role: .destructive) { model.deleteServer(server) }
+        } message: { _ in
+            Text("The saved credentials are removed from this device. Nothing changes on the server.")
         }
     }
 }
 
 extension Bundle {
-    var appVersion: String {
-        infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-    }
-    var appBuild: String {
-        infoDictionary?["CFBundleVersion"] as? String ?? "1"
-    }
+    var appVersion: String { infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0" }
+    var appBuild: String { infoDictionary?["CFBundleVersion"] as? String ?? "1" }
 }
