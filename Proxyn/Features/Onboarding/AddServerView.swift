@@ -1,8 +1,11 @@
 import SwiftUI
 
-/// Add / edit a server. Credentials are validated against the real API before
-/// anything is saved, and TLS problems are surfaced with the actual fingerprint
-/// so the user can pin it instead of blindly trusting everything.
+/// Adds or edits a server. Credentials are verified against the real API before
+/// anything is saved.
+///
+/// Certificates follow trust-on-first-use: if the system doesn't trust the
+/// server's certificate, its SHA-256 fingerprint is shown and, once the user
+/// confirms it matches the one in the Proxmox web UI, it is pinned.
 struct AddServerView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -19,223 +22,184 @@ struct AddServerView: View {
     @State private var password = ""
     @State private var tokenID = ""
     @State private var tokenSecret = ""
-    @State private var allowInsecure = true
+    @State private var skipVerification = false
     @State private var pinnedFingerprint: String?
 
-    @State private var testing = false
-    @State private var result: TestResult?
-    @State private var totpCode = ""
+    @State private var connecting = false
+    @State private var errorMessage: String?
+    @State private var certificateToTrust: String?
     @State private var totpChallenge: String?
-    @State private var observedFingerprint: String?
+    @State private var totpCode = ""
 
-    private enum TestResult: Equatable {
-        case success(String)
-        case failure(String)
-        var isSuccess: Bool { if case .success = self { return true }; return false }
+    @FocusState private var focusedField: Field?
+
+    enum Field { case name, host, port, username, realm, password, tokenID, secret }
+
+    private var trimmedHost: String {
+        host.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
-    private var canSubmit: Bool {
-        guard !host.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+    private var portNumber: Int? {
+        guard let value = Int(port), (1...65_535).contains(value) else { return nil }
+        return value
+    }
+
+    private var canConnect: Bool {
+        guard !trimmedHost.isEmpty, portNumber != nil, !username.isEmpty, !realm.isEmpty else { return false }
         switch method {
-        case .ticket: return !username.isEmpty && !password.isEmpty
-        case .apiToken: return !username.isEmpty && !tokenID.isEmpty && !tokenSecret.isEmpty
+        case .ticket: return !password.isEmpty
+        case .apiToken: return !tokenID.isEmpty && !tokenSecret.isEmpty
         }
     }
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                Palette.sheetCanvas.ignoresSafeArea()
-
-                ScrollView {
-                    VStack(spacing: 16) {
-                        endpointCard
-                        authCard
-                        securityCard
-                        if let result { resultCard(result) }
-                        submitButton
+            Form {
+                Section {
+                    TextField("Name", text: $name, prompt: Text("Homelab"))
+                        .focused($focusedField, equals: .name)
+                        .submitLabel(.next)
+                        .onSubmit { focusedField = .host }
+                    TextField("Address", text: $host, prompt: Text("192.168.1.10 or pve.example.com"))
+                        .keyboardType(.URL)
+                        .textContentType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($focusedField, equals: .host)
+                        .submitLabel(.next)
+                        .onSubmit { focusedField = .username }
+                    LabeledContent("Port") {
+                        TextField("Port", text: $port, prompt: Text("8006"))
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .focused($focusedField, equals: .port)
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 8)
-                    .padding(.bottom, 40)
+                    Toggle("Use HTTPS", isOn: $useHTTPS)
+                } header: {
+                    Text("Server")
+                } footer: {
+                    if !useHTTPS {
+                        Text("Without HTTPS, your password and everything you do are sent unencrypted.")
+                            .foregroundStyle(Palette.warning)
+                    }
                 }
-                .scrollIndicators(.hidden)
-                .scrollDismissesKeyboard(.interactively)
+
+                Section {
+                    Picker("Sign in with", selection: $method) {
+                        ForEach(PVEAuthMethod.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    TextField("Username", text: $username)
+                        .textContentType(.username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($focusedField, equals: .username)
+                    Picker("Realm", selection: $realm) {
+                        Text("Linux PAM (pam)").tag("pam")
+                        Text("Proxmox VE (pve)").tag("pve")
+                        if !["pam", "pve"].contains(realm) { Text(realm).tag(realm) }
+                    }
+
+                    if method == .ticket {
+                        SecureField("Password", text: $password)
+                            .textContentType(.password)
+                            .focused($focusedField, equals: .password)
+                            .submitLabel(.go)
+                            .onSubmit { connect(totp: nil) }
+                    } else {
+                        TextField("Token ID", text: $tokenID, prompt: Text("proxyn"))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .focused($focusedField, equals: .tokenID)
+                        SecureField("Secret", text: $tokenSecret)
+                            .focused($focusedField, equals: .secret)
+                            .submitLabel(.go)
+                            .onSubmit { connect(totp: nil) }
+                    }
+                } header: {
+                    Text("Authentication")
+                } footer: {
+                    Text(method == .apiToken
+                         ? "\(method.explanation) Create one under Datacenter → Permissions → API Tokens."
+                         : method.explanation)
+                }
+
+                Section {
+                    if let pinnedFingerprint {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label("Trusted certificate", systemImage: "checkmark.seal.fill")
+                                .foregroundStyle(Palette.positive)
+                            Text(pinnedFingerprint)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Button("Forget Certificate", role: .destructive) { self.pinnedFingerprint = nil }
+                    }
+                    Toggle("Skip Certificate Verification", isOn: $skipVerification)
+                } header: {
+                    Text("Security")
+                } footer: {
+                    Text("Leave verification on. For self-signed certificates, Proxyn will ask you to confirm the fingerprint once and remember it.")
+                }
+
+                if let errorMessage {
+                    Section {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Palette.critical)
+                    }
+                }
             }
-            .navigationTitle(editing == nil ? "Nouveau serveur" : "Modifier")
+            .navigationTitle(editing == nil ? "Add Server" : "Edit Server")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Palette.sheetCanvas, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Annuler") { dismiss() }
-                        .foregroundStyle(Palette.inkSecondary)
+                    Button("Cancel") { dismiss() }
                 }
-            }
-        }
-        .presentationBackground(Palette.sheetCanvas)
-        .onAppear(perform: loadEditing)
-    }
-
-    // MARK: Cards
-
-    private var endpointCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
-                SectionLabel("Point d'accès")
-
-                ProxynField(label: "Nom", placeholder: "homelab", text: $name,
-                            symbol: "tag.fill", autocapitalization: .words)
-
-                ProxynField(label: "Hôte ou IP", placeholder: "192.168.1.10", text: $host,
-                            symbol: "network", keyboard: .URL, monospaced: true)
-
-                HStack(spacing: 12) {
-                    ProxynField(label: "Port", placeholder: "8006", text: $port,
-                                symbol: "number", keyboard: .numberPad, monospaced: true)
-                        .frame(width: 130)
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("PROTOCOLE")
-                            .font(.system(size: 10, weight: .bold))
-                            .tracking(1.1)
-                            .foregroundStyle(Palette.inkTertiary)
-                        SegmentedRail(items: [StringOption("https", "HTTPS"), StringOption("http", "HTTP")],
-                                      label: \.title,
-                                      selection: Binding(
-                                        get: { StringOption(useHTTPS ? "https" : "http", useHTTPS ? "HTTPS" : "HTTP") },
-                                        set: { useHTTPS = $0.value == "https" }))
+                ToolbarItem(placement: .confirmationAction) {
+                    if connecting {
+                        ProgressView()
+                    } else {
+                        Button(editing == nil ? "Connect" : "Save") { connect(totp: nil) }
+                            .fontWeight(.semibold)
+                            .disabled(!canConnect)
                     }
                 }
             }
-        }
-    }
-
-    private var authCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
-                SectionLabel("Authentification")
-
-                SegmentedRail(items: PVEAuthMethod.allCases,
-                              label: \.title,
-                              symbol: { $0.symbol },
-                              selection: $method)
-
-                Text(method.subtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.inkTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 12) {
-                    ProxynField(label: "Utilisateur", placeholder: "root", text: $username,
-                                symbol: "person.fill", monospaced: true)
-                    ProxynField(label: "Realm", placeholder: "pam", text: $realm,
-                                symbol: "building.columns.fill", monospaced: true)
-                        .frame(width: 118)
+            .disabled(connecting)
+            .interactiveDismissDisabled(connecting)
+            .onAppear(perform: loadEditing)
+            .alert("Trust This Certificate?",
+                   isPresented: Binding(get: { certificateToTrust != nil },
+                                        set: { if !$0 { certificateToTrust = nil } }),
+                   presenting: certificateToTrust) { fingerprint in
+                Button("Trust") {
+                    pinnedFingerprint = fingerprint
+                    connect(totp: nil)
                 }
-
-                if method == .ticket {
-                    ProxynField(label: "Mot de passe", placeholder: "••••••••", text: $password,
-                                symbol: "key.fill", isSecure: true, submitLabel: .go, onSubmit: test)
-                } else {
-                    ProxynField(label: "ID du jeton", placeholder: "proxyn", text: $tokenID,
-                                symbol: "number.square.fill", monospaced: true)
-                    ProxynField(label: "Secret", placeholder: "xxxxxxxx-xxxx-…", text: $tokenSecret,
-                                symbol: "key.horizontal.fill", isSecure: true, monospaced: true,
-                                submitLabel: .go, onSubmit: test)
-                    Text("Créez le jeton dans Datacenter → Permissions → API Tokens, en décochant « Privilege Separation » ou en lui donnant les droits voulus.")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Palette.inkTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                Button("Cancel", role: .cancel) {}
+            } message: { fingerprint in
+                Text("\(trimmedHost) presented a certificate that isn't signed by a trusted authority. Only continue if this SHA-256 fingerprint matches the one shown in the Proxmox web interface under Node → System → Certificates.\n\n\(fingerprint)")
+            }
+            .alert("Two-Factor Authentication",
+                   isPresented: Binding(get: { totpChallenge != nil },
+                                        set: { if !$0 { totpChallenge = nil; totpCode = "" } })) {
+                TextField("6-digit code", text: $totpCode)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                Button("Verify") {
+                    let pending = totpChallenge.map { (challenge: $0, code: totpCode) }
+                    connect(totp: pending)
                 }
-
-                if let totpChallenge, !totpChallenge.isEmpty {
-                    Divider1px()
-                    ProxynField(label: "Code à usage unique", placeholder: "123456", text: $totpCode,
-                                symbol: "lock.rotation", keyboard: .numberPad, monospaced: true,
-                                submitLabel: .go, onSubmit: test)
-                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Enter the code from your authenticator app.")
             }
         }
-    }
-
-    private var securityCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionLabel("Transport")
-
-                ToggleRow(title: "Accepter le certificat auto-signé",
-                          subtitle: "Indispensable pour la plupart des installations Proxmox, qui utilisent un certificat généré localement.",
-                          symbol: "lock.trianglebadge.exclamationmark.fill",
-                          isOn: $allowInsecure)
-
-                if let fingerprint = observedFingerprint ?? pinnedFingerprint {
-                    Divider1px()
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) {
-                            Image(systemName: pinnedFingerprint != nil ? "checkmark.seal.fill" : "seal")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(pinnedFingerprint != nil ? Palette.mint : Palette.inkTertiary)
-                            Text(pinnedFingerprint != nil ? "Certificat épinglé" : "Empreinte SHA-256 détectée")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Palette.ink)
-                            Spacer()
-                            Button(pinnedFingerprint != nil ? "Retirer" : "Épingler") {
-                                Haptics.commit()
-                                withAnimation(Motion.snap) {
-                                    pinnedFingerprint = pinnedFingerprint == nil ? fingerprint : nil
-                                }
-                            }
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .foregroundStyle(Palette.ember)
-                        }
-                        Text(fingerprint)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(Palette.inkSecondary)
-                            .lineLimit(3)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-        }
-    }
-
-    private func resultCard(_ result: TestResult) -> some View {
-        let ok = result.isSuccess
-        let message: String = {
-            switch result {
-            case .success(let m), .failure(let m): return m
-            }
-        }()
-        return HStack(alignment: .top, spacing: 11) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(ok ? Palette.mint : Palette.rose)
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(Palette.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill((ok ? Palette.mint : Palette.rose).opacity(0.1))
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder((ok ? Palette.mint : Palette.rose).opacity(0.3), lineWidth: 1)))
-        .transition(.opacity.combined(with: .move(edge: .top)))
-    }
-
-    private var submitButton: some View {
-        Button(action: test) {
-            HStack(spacing: 8) {
-                if testing {
-                    ProgressView().controlSize(.small).tint(.black)
-                }
-                Text(testing ? "Connexion…" : (editing == nil ? "Tester et connecter" : "Enregistrer"))
-            }
-        }
-        .buttonStyle(ProminentButtonStyle())
-        .disabled(!canSubmit || testing)
-        .opacity(canSubmit ? 1 : 0.5)
     }
 
     // MARK: Logic
@@ -250,7 +214,7 @@ struct AddServerView: View {
         username = editing.username
         realm = editing.realm
         tokenID = editing.tokenID
-        allowInsecure = editing.allowInsecureTLS
+        skipVerification = editing.skipCertificateVerification
         pinnedFingerprint = editing.pinnedCertificateSHA256
         if let secret = editing.secret {
             if editing.authMethod == .ticket { password = secret } else { tokenSecret = secret }
@@ -259,78 +223,67 @@ struct AddServerView: View {
 
     private func buildProfile() -> ServerProfile {
         var profile = editing ?? ServerProfile()
-        profile.name = name.isEmpty ? host : name
-        profile.host = host.trimmingCharacters(in: .whitespaces)
-            .replacingOccurrences(of: "https://", with: "")
-            .replacingOccurrences(of: "http://", with: "")
-        profile.port = Int(port) ?? 8006
+        profile.name = name.trimmingCharacters(in: .whitespaces)
+        profile.host = trimmedHost
+        profile.port = portNumber ?? 8006
         profile.useHTTPS = useHTTPS
         profile.authMethod = method
         profile.username = username.trimmingCharacters(in: .whitespaces)
-        profile.realm = realm.trimmingCharacters(in: .whitespaces).isEmpty ? "pam" : realm
+        profile.realm = realm
         profile.tokenID = tokenID.trimmingCharacters(in: .whitespaces)
-        profile.allowInsecureTLS = allowInsecure
+        profile.skipCertificateVerification = skipVerification
         profile.pinnedCertificateSHA256 = pinnedFingerprint
         return profile
     }
 
-    private func test() {
-        guard canSubmit, !testing else { return }
-        testing = true
-        withAnimation(Motion.snap) { result = nil }
+    private func connect(totp: (challenge: String, code: String)?) {
+        guard canConnect, !connecting else { return }
+        focusedField = nil
+        connecting = true
+        errorMessage = nil
+
+        let profile = buildProfile()
+        let secret = method == .ticket ? password : tokenSecret
+        let challenge = totp?.challenge
+        let code = (totp?.code ?? "").trimmingCharacters(in: .whitespaces)
 
         Task {
-            let profile = buildProfile()
-            profile.secret = method == .ticket ? password : tokenSecret
-            let client = ProxmoxClient(profile: profile)
-
+            defer { connecting = false }
+            // The secret is written only once the connection has succeeded, so
+            // a failed attempt never overwrites a working saved password.
+            let probe = ProxmoxClient(profile: profile, secretOverride: secret)
             do {
                 if method == .ticket {
-                    if let challenge = totpChallenge, !totpCode.isEmpty {
-                        try await client.login(totpCode: totpCode.trimmingCharacters(in: .whitespaces),
-                                               tfaChallenge: challenge)
+                    if let challenge, !code.isEmpty {
+                        try await probe.login(totpCode: code, tfaChallenge: challenge)
                     } else {
-                        try await client.login()
+                        try await probe.login()
                     }
                 }
-                let version = try await client.version()
-                let nodes = (try? await client.nodes()) ?? []
-                observedFingerprint = await client.observedFingerprint
+                _ = try await probe.version()
 
+                profile.secret = secret
                 Haptics.success()
-                let detail = "Proxmox VE \(version.version ?? "?") · \(nodes.count) nœud\(nodes.count > 1 ? "s" : "")"
-                withAnimation(Motion.snap) { result = .success("Connexion établie — \(detail)") }
-
-                try? await Task.sleep(for: .milliseconds(520))
-                if editing == nil {
-                    model.addServer(profile)
-                } else {
-                    model.updateServer(profile)
-                }
+                if editing == nil { model.addServer(profile) } else { model.updateServer(profile) }
                 dismiss()
             } catch let error as ProxmoxError {
-                observedFingerprint = await client.observedFingerprint
                 switch error {
-                case .needsTOTP(let challenge):
-                    Haptics.warning()
-                    withAnimation(Motion.snap) {
-                        totpChallenge = challenge
-                        result = .failure("Double authentification activée : saisissez le code à usage unique ci-dessus.")
-                    }
-                case .tlsRejected:
-                    Haptics.failure()
-                    withAnimation(Motion.snap) {
-                        result = .failure("Le certificat TLS a été refusé. Activez « Accepter le certificat auto-signé » puis réessayez.")
+                case .needsTOTP(let newChallenge):
+                    totpChallenge = newChallenge
+                case .untrustedCertificate(_, let fingerprint), .certificateChanged(_, let fingerprint):
+                    if let fingerprint {
+                        certificateToTrust = fingerprint
+                    } else {
+                        errorMessage = error.localizedDescription
                     }
                 default:
                     Haptics.failure()
-                    withAnimation(Motion.snap) { result = .failure(error.localizedDescription) }
+                    errorMessage = error.localizedDescription
                 }
             } catch {
                 Haptics.failure()
-                withAnimation(Motion.snap) { result = .failure(error.localizedDescription) }
+                errorMessage = error.localizedDescription
             }
-            testing = false
         }
     }
 }
