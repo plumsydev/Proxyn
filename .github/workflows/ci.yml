@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core-tests:
+    name: Core tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run unit tests
+        run: swift test
+
+  app-build:
+    name: App build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app and widgets (Release, device)
+        run: |
+          xcodebuild build \
+            -project Proxyn.xcodeproj \
+            -scheme Proxyn \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO
