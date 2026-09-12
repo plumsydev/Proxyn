@@ -1,0 +1,55 @@
+name: Proxyn
+options:
+  bundleIdPrefix: com.proxyn
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_EMIT_LOC_STRINGS: YES
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  Proxyn:
+    type: application
+    platform: iOS
+    sources:
+      - path: Proxyn
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.proxyn.app
+        INFOPLIST_FILE: Proxyn/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_ENTITLEMENTS: Proxyn/Resources/Proxyn.entitlements
+        SUPPORTS_MACCATALYST: NO
+        ENABLE_PREVIEWS: YES
+        SWIFT_STRICT_CONCURRENCY: minimal
+    dependencies:
+      - target: ProxynWidgets
+        embed: true
+
+  ProxynWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ProxynWidgets
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.proxyn.app.widgets
+        INFOPLIST_FILE: ProxynWidgets/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ProxynWidgets/ProxynWidgets.entitlements
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_STRICT_CONCURRENCY: minimal
