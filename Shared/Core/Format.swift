@@ -1,136 +1,179 @@
 import Foundation
 
+/// The app ships in English only. Formatters use English for words but the
+/// device's region for conventions (24-hour clock, date order, decimal mark),
+/// so a French user gets "Sep 11, 14:02" rather than "Sep 11, 2:02 PM" — and
+/// never a French word inside an English sentence.
+enum AppLocale {
+    static let current: Locale = {
+        let language = Bundle.main.preferredLocalizations.first ?? "en"
+        let region = Locale.current.region?.identifier ?? "US"
+        return Locale(identifier: "\(language)_\(region)")
+    }()
+}
+
 enum Format {
-    static func bytes(_ value: Double?, decimals: Int? = nil) -> String {
-        guard let value, value.isFinite else { return "—" }
-        let units = ["o", "Ko", "Mo", "Go", "To", "Po"]
-        var v = abs(value)
-        var idx = 0
-        while v >= 1024, idx < units.count - 1 { v /= 1024; idx += 1 }
-        let d = decimals ?? (v < 10 && idx > 0 ? 1 : 0)
-        return String(format: "%.\(d)f %@", v, units[idx])
+
+    // MARK: Sizes
+
+    private static let byteUnits = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+
+    /// Binary units, matching what the Proxmox web interface displays.
+    static func bytes(_ value: Double?) -> String {
+        let parts = bytesParts(value)
+        return parts.unit.isEmpty ? parts.value : "\(parts.value) \(parts.unit)"
     }
 
-    /// Splits a byte value so the UI can typeset the number and unit differently.
+    /// Number and unit separately, so the UI can set the unit smaller.
     static func bytesParts(_ value: Double?) -> (value: String, unit: String) {
         guard let value, value.isFinite else { return ("—", "") }
-        let units = ["o", "Ko", "Mo", "Go", "To", "Po"]
         var v = abs(value)
-        var idx = 0
-        while v >= 1024, idx < units.count - 1 { v /= 1024; idx += 1 }
-        let d = v < 10 && idx > 0 ? 1 : 0
-        return (String(format: "%.\(d)f", v), units[idx])
+        var index = 0
+        while v >= 1024, index < byteUnits.count - 1 {
+            v /= 1024
+            index += 1
+        }
+        let digits = (index > 0 && v < 10) ? 1 : 0
+        return (number(v, fractionDigits: digits), byteUnits[index])
+    }
+
+    static func rate(_ bytesPerSecond: Double?) -> String {
+        bytes(bytesPerSecond) + "/s"
+    }
+
+    // MARK: Numbers
+
+    static func number(_ value: Double, fractionDigits: Int) -> String {
+        value.formatted(.number
+            .precision(.fractionLength(fractionDigits))
+            .locale(AppLocale.current))
     }
 
     static func percent(_ fraction: Double?, decimals: Int = 0) -> String {
         guard let fraction, fraction.isFinite else { return "—" }
-        return String(format: "%.\(decimals)f%%", fraction * 100)
+        return number(fraction * 100, fractionDigits: decimals) + "%"
     }
 
     static func compactNumber(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "—" }
-        let a = abs(value)
-        switch a {
-        case 0..<1_000: return String(format: a < 10 && a != a.rounded() ? "%.1f" : "%.0f", value)
-        case 1_000..<1_000_000: return String(format: "%.1fk", value / 1_000)
-        case 1_000_000..<1_000_000_000: return String(format: "%.1fM", value / 1_000_000)
-        default: return String(format: "%.1fG", value / 1_000_000_000)
-        }
+        return value.formatted(.number.notation(.compactName).precision(.significantDigits(3))
+            .locale(AppLocale.current))
     }
 
+    // MARK: Durations
+
+    /// "21d 7h", "7h 12m", "4m".
     static func uptime(_ seconds: Double?) -> String {
         guard let seconds, seconds > 0 else { return "—" }
         let s = Int(seconds)
-        let d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60
-        if d > 0 { return "\(d)j \(h)h" }
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m)m"
+        let days = s / 86_400, hours = (s % 86_400) / 3_600, minutes = (s % 3_600) / 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(max(minutes, 1))m"
     }
 
+    private static let longDuration: DateComponentsFormatter = {
+        let f = DateComponentsFormatter()
+        f.allowedUnits = [.day, .hour, .minute]
+        f.unitsStyle = .full
+        f.maximumUnitCount = 2
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = AppLocale.current
+        f.calendar = calendar
+        return f
+    }()
+
+    /// "21 days, 7 hours".
     static func uptimeLong(_ seconds: Double?) -> String {
         guard let seconds, seconds > 0 else { return "—" }
-        let s = Int(seconds)
-        let d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60, sec = s % 60
-        var parts: [String] = []
-        if d > 0 { parts.append("\(d) j") }
-        if h > 0 { parts.append("\(h) h") }
-        if m > 0 { parts.append("\(m) min") }
-        if parts.isEmpty { parts.append("\(sec) s") }
-        return parts.joined(separator: " ")
+        return longDuration.string(from: max(seconds, 60)) ?? uptime(seconds)
     }
 
+    /// "42s", "2m 59s", "1h 04m".
     static func duration(_ seconds: Double?) -> String {
         guard let seconds, seconds.isFinite, seconds >= 0 else { return "—" }
         let s = Int(seconds)
-        if s < 60 { return "\(s) s" }
-        if s < 3600 { return "\(s / 60) min \(s % 60) s" }
-        return "\(s / 3600) h \((s % 3600) / 60) min"
+        if s < 60 { return "\(s)s" }
+        if s < 3_600 { return "\(s / 60)m \(String(format: "%02d", s % 60))s" }
+        return "\(s / 3_600)h \(String(format: "%02d", (s % 3_600) / 60))m"
     }
+
+    // MARK: Dates
 
     private static let relative: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
-        f.locale = Locale(identifier: "fr_FR")
+        f.locale = AppLocale.current
         return f
     }()
 
     static func ago(_ date: Date?) -> String {
         guard let date else { return "—" }
+        if abs(date.timeIntervalSinceNow) < 45 { return "just now" }
         return relative.localizedString(for: date, relativeTo: Date())
     }
 
-    private static let dateTime: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "fr_FR")
-        f.dateFormat = "d MMM · HH:mm"
-        return f
-    }()
-
     static func dateTime(_ date: Date?) -> String {
         guard let date else { return "—" }
-        return dateTime.string(from: date)
+        return date.formatted(.dateTime.month(.abbreviated).day().hour().minute()
+            .locale(AppLocale.current))
     }
-
-    private static let clock: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "fr_FR")
-        f.dateFormat = "HH:mm:ss"
-        return f
-    }()
 
     static func clock(_ date: Date?) -> String {
         guard let date else { return "—" }
-        return clock.string(from: date)
+        return date.formatted(.dateTime.hour().minute().second().locale(AppLocale.current))
     }
 
-    /// `UPID:pve:0000ABCD:...:qmstart:100:root@pam:` → "Démarrage VM"
+    static func dayHeading(_ date: Date?) -> String {
+        guard let date else { return "Unknown date" }
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Today" }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        return date.formatted(.dateTime.weekday(.wide).month(.wide).day().locale(AppLocale.current))
+    }
+
+    // MARK: Proxmox task names
+
+    /// `qmstart` → "Start VM". Unknown types are title-cased rather than hidden.
     static func taskType(_ raw: String?) -> String {
-        guard let raw, !raw.isEmpty else { return "Tâche" }
-        let map: [String: String] = [
-            "qmstart": "Démarrage VM", "qmstop": "Arrêt forcé VM", "qmshutdown": "Arrêt VM",
-            "qmreboot": "Redémarrage VM", "qmreset": "Reset VM", "qmsuspend": "Suspension VM",
-            "qmresume": "Reprise VM", "qmclone": "Clonage VM", "qmigrate": "Migration VM",
-            "qmsnapshot": "Snapshot VM", "qmdelsnapshot": "Suppr. snapshot", "qmrollback": "Rollback VM",
-            "qmcreate": "Création VM", "qmdestroy": "Suppression VM", "qmconfig": "Config VM",
-            "qmtemplate": "Template VM", "qmmove": "Déplacement disque",
-            "vzstart": "Démarrage LXC", "vzstop": "Arrêt forcé LXC", "vzshutdown": "Arrêt LXC",
-            "vzreboot": "Redémarrage LXC", "vzcreate": "Création LXC", "vzdestroy": "Suppression LXC",
-            "vzclone": "Clonage LXC", "vzmigrate": "Migration LXC", "vzsnapshot": "Snapshot LXC",
-            "vzdelsnapshot": "Suppr. snapshot", "vzrollback": "Rollback LXC", "vzdump": "Sauvegarde",
-            "vzrestore": "Restauration", "imgcopy": "Copie image", "imgdel": "Suppr. image",
-            "download": "Téléchargement", "aptupdate": "MàJ dépôts", "aptupgrade": "Mise à jour",
-            "srvstart": "Démarrage service", "srvstop": "Arrêt service", "srvrestart": "Redémarrage service",
-            "startall": "Démarrage groupé", "stopall": "Arrêt groupé", "migrateall": "Migration groupée",
-            "vncproxy": "Console", "termproxy": "Terminal", "spiceproxy": "SPICE",
-            "resize": "Redimensionnement", "unknownimgdel": "Nettoyage", "cephcreatemon": "Ceph",
-            "pull_file": "Lecture fichier", "push_file": "Écriture fichier", "backupjob": "Job sauvegarde"
+        guard let raw, !raw.isEmpty else { return "Task" }
+        let names: [String: String] = [
+            "qmstart": "Start VM", "qmstop": "Stop VM", "qmshutdown": "Shut Down VM",
+            "qmreboot": "Reboot VM", "qmreset": "Reset VM", "qmsuspend": "Suspend VM",
+            "qmresume": "Resume VM", "qmpause": "Pause VM", "qmclone": "Clone VM",
+            "qmigrate": "Migrate VM", "qmsnapshot": "Take Snapshot", "qmdelsnapshot": "Delete Snapshot",
+            "qmrollback": "Roll Back Snapshot", "qmcreate": "Create VM", "qmdestroy": "Destroy VM",
+            "qmconfig": "Update VM Config", "qmtemplate": "Convert to Template", "qmmove": "Move Disk",
+            "qmresize": "Resize Disk",
+            "vzstart": "Start Container", "vzstop": "Stop Container", "vzshutdown": "Shut Down Container",
+            "vzreboot": "Reboot Container", "vzcreate": "Create Container", "vzdestroy": "Destroy Container",
+            "vzclone": "Clone Container", "vzmigrate": "Migrate Container", "vzsnapshot": "Take Snapshot",
+            "vzdelsnapshot": "Delete Snapshot", "vzrollback": "Roll Back Snapshot",
+            "vzdump": "Backup", "vzrestore": "Restore", "qmrestore": "Restore",
+            "imgcopy": "Copy Image", "imgdel": "Delete Image", "download": "Download",
+            "aptupdate": "Update Package Lists", "aptupgrade": "Upgrade Packages",
+            "srvstart": "Start Service", "srvstop": "Stop Service", "srvrestart": "Restart Service",
+            "srvreload": "Reload Service",
+            "startall": "Start All Guests", "stopall": "Stop All Guests", "migrateall": "Migrate All Guests",
+            "vncproxy": "Console", "vncshell": "Shell", "termproxy": "Terminal", "spiceproxy": "SPICE",
+            "resize": "Resize Disk", "backupjob": "Scheduled Backup", "reboot": "Reboot Node",
+            "shutdown": "Shut Down Node", "hamigrate": "HA Migrate", "hastart": "HA Start",
+            "hastop": "HA Stop"
         ]
-        return map[raw] ?? raw.capitalized
+        if let name = names[raw] { return name }
+        return raw.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     static func shortUPID(_ upid: String) -> String {
         let parts = upid.split(separator: ":")
         guard parts.count > 5 else { return upid }
         return String(parts[5])
+    }
+
+    /// `pve-manager/8.3.2/d4b9f1e2` → `8.3.2`
+    static func pveVersion(_ raw: String?) -> String {
+        guard let raw else { return "—" }
+        let parts = raw.split(separator: "/")
+        return parts.count > 1 ? String(parts[1]) : raw
     }
 }
