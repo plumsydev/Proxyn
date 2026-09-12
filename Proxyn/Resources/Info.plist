@@ -3,10 +3,8 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>fr_FR</string>
+	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Proxyn</string>
-	<key>CFBundleName</key>
 	<string>Proxyn</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
@@ -14,21 +12,52 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.proxyn.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>proxyn</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>UILaunchScreen</key>
+	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>UIColorName</key>
-		<string>LaunchBackground</string>
+		<!-- Proxyn connects to servers the user enters: private IPs, .local names,
+		     VPN addresses and reverse proxies, often without a publicly trusted
+		     certificate. Certificate trust is enforced in code (system trust or a
+		     pinned SHA-256 fingerprint); plain HTTP is only used when the user
+		     turns HTTPS off, and the app warns about it. -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
 	</dict>
-	<key>UIUserInterfaceStyle</key>
-	<string>Dark</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Proxyn connects directly to the Proxmox servers you add on your local network to show their status and run the actions you choose.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -42,16 +71,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Proxyn se connecte directement à vos serveurs Proxmox sur le réseau local pour afficher leurs métriques et exécuter vos actions.</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 </dict>
 </plist>
