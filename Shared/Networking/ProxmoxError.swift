@@ -8,7 +8,10 @@ enum ProxmoxError: LocalizedError, Sendable, Equatable {
     case forbidden(String?)
     case httpStatus(Int, String?)
     case transport(String)
-    case tlsRejected(host: String, fingerprint: String?)
+    /// The system does not trust the certificate and nothing has been pinned.
+    case untrustedCertificate(host: String, fingerprint: String?)
+    /// A certificate was pinned for this server and the one presented differs.
+    case certificateChanged(host: String, fingerprint: String?)
     case decoding(String)
     case missingSecret
     case cancelled
@@ -16,27 +19,29 @@ enum ProxmoxError: LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidURL:
-            return "Adresse du serveur invalide."
+            return "The server address is not valid."
         case .notAuthenticated:
-            return "Session expirée. Reconnexion nécessaire."
+            return "Your session expired. Sign in again."
         case .needsTOTP:
-            return "Code à usage unique requis."
+            return "A one-time code is required."
         case .badCredentials(let detail):
-            return detail ?? "Identifiants refusés par Proxmox."
+            return detail ?? "Proxmox rejected these credentials."
         case .forbidden(let detail):
-            return detail ?? "Permissions insuffisantes pour cette action."
+            return detail ?? "This account doesn't have permission to do that."
         case .httpStatus(let code, let detail):
-            return detail.map { "\($0) (HTTP \(code))" } ?? "Le serveur a répondu HTTP \(code)."
-        case .transport(let msg):
-            return msg
-        case .tlsRejected(let host, _):
-            return "Certificat TLS de \(host) refusé. Activez le certificat auto-signé dans les réglages du serveur."
-        case .decoding(let msg):
-            return "Réponse illisible : \(msg)"
+            return detail.map { "\($0) (HTTP \(code))" } ?? "The server responded with HTTP \(code)."
+        case .transport(let message):
+            return message
+        case .untrustedCertificate(let host, _):
+            return "The certificate presented by \(host) isn't trusted."
+        case .certificateChanged(let host, _):
+            return "The certificate presented by \(host) has changed since you trusted it."
+        case .decoding(let message):
+            return "The server sent a response Proxyn couldn't read. \(message)"
         case .missingSecret:
-            return "Aucun mot de passe / secret enregistré pour ce serveur."
+            return "No password or token secret is saved for this server."
         case .cancelled:
-            return "Requête annulée."
+            return "The request was cancelled."
         }
     }
 
@@ -44,6 +49,15 @@ enum ProxmoxError: LocalizedError, Sendable, Equatable {
         switch self {
         case .notAuthenticated, .badCredentials: return true
         default: return false
+        }
+    }
+
+    var certificateFingerprint: String? {
+        switch self {
+        case .untrustedCertificate(_, let fingerprint), .certificateChanged(_, let fingerprint):
+            return fingerprint
+        default:
+            return nil
         }
     }
 }
