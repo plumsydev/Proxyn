@@ -9,15 +9,17 @@ struct ProxynApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
-                .preferredColorScheme(.dark)
-                .tint(Palette.ember)
+                .tint(Palette.accent)
+                .preferredColorScheme(model.preferredColorScheme)
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
-                Task { await model.resumeLive() }
-            case .background, .inactive:
-                model.stopPolling()
+                Task { await model.resume() }
+            case .background:
+                model.suspend()
+            case .inactive:
+                break
             @unknown default:
                 break
             }
