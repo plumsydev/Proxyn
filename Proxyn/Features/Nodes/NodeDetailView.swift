@@ -5,8 +5,8 @@ struct NodeDetailView: View {
     let node: String
 
     @State private var vm: NodeDetailModel
-    @State private var section: NodeSection = .overview
-    @State private var confirmPower: NodePowerIntent?
+    @State private var page: Page = .summary
+    @State private var pendingIntent: NodePowerIntent?
     @State private var showShell = false
 
     init(node: String) {
@@ -14,18 +14,9 @@ struct NodeDetailView: View {
         _vm = State(initialValue: NodeDetailModel(node: node))
     }
 
-    enum NodeSection: Int, CaseIterable, Identifiable, Hashable {
-        case overview, hardware, network, services, tasks
-        var id: Int { rawValue }
-        var title: String {
-            switch self {
-            case .overview: return "Aperçu"
-            case .hardware: return "Matériel"
-            case .network: return "Réseau"
-            case .services: return "Services"
-            case .tasks: return "Tâches"
-            }
-        }
+    enum Page: String, CaseIterable, Identifiable {
+        case summary = "Summary", charts = "Charts", system = "System", tasks = "Tasks"
+        var id: String { rawValue }
     }
 
     private var resource: PVEResource? {
@@ -33,419 +24,267 @@ struct NodeDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                headerCard
-
-                SegmentedRail(items: NodeSection.allCases, label: \.title, selection: $section)
-
-                switch section {
-                case .overview: overviewSection
-                case .hardware: hardwareSection
-                case .network: networkSection
-                case .services: servicesSection
-                case .tasks: tasksSection
+        List {
+            if let error = vm.error {
+                Section {
+                    InlineErrorRow(message: error) { Task { await vm.load(using: app.client()) } }
                 }
             }
-            .padding(.horizontal, Metrics.gutter)
-            .padding(.bottom, 92)
-            .animation(Motion.snap, value: section)
+
+            Section {
+                Picker("Section", selection: $page) {
+                    ForEach(Page.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+            }
+
+            switch page {
+            case .summary: summary
+            case .charts: charts
+            case .system: system
+            case .tasks: tasks
+            }
         }
-        .scrollIndicators(.hidden)
-        .background(AuroraBackground(tint: Palette.ember, intensity: 0.55).ignoresSafeArea())
+        .proxynList()
         .navigationTitle(node)
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button { showShell = true } label: {
-                        Label("Terminal du nœud", systemImage: "terminal.fill")
-                    }
-                    Divider()
-                    Button { confirmPower = .startAll } label: {
-                        Label("Démarrer toutes les instances", systemImage: "play.circle")
-                    }
-                    Button { confirmPower = .stopAll } label: {
-                        Label("Arrêter toutes les instances", systemImage: "stop.circle")
-                    }
-                    Divider()
-                    Button(role: .destructive) { confirmPower = .reboot } label: {
-                        Label("Redémarrer le nœud", systemImage: "arrow.clockwise")
-                    }
-                    Button(role: .destructive) { confirmPower = .shutdown } label: {
-                        Label("Éteindre le nœud", systemImage: "power")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Palette.ember)
-                }
-            }
+            ToolbarItem(placement: .topBarTrailing) { actionsMenu }
         }
         .refreshable { await vm.load(using: app.client()) }
         .task {
             await vm.load(using: app.client())
-            vm.startLive(api: app.client(), interval: app.settings.liveRefreshInterval)
+            vm.startLive(api: app.client(), interval: app.settings.refreshInterval)
         }
         .onDisappear { vm.stopLive() }
         .sheet(isPresented: $showShell) {
-            ConsoleView(target: .node(node), title: "Terminal · \(node)")
+            ConsoleView(target: .node(node), title: "Shell — \(node)")
         }
-        .alert(confirmPower?.title ?? "",
-               isPresented: Binding(get: { confirmPower != nil },
-                                    set: { if !$0 { confirmPower = nil } }),
-               presenting: confirmPower) { intent in
-            Button(intent.confirmLabel, role: .destructive) { run(intent) }
-            Button("Annuler", role: .cancel) {}
+        .confirmationDialog(pendingIntent?.title ?? "",
+                            isPresented: Binding(get: { pendingIntent != nil },
+                                                 set: { if !$0 { pendingIntent = nil } }),
+                            titleVisibility: .visible,
+                            presenting: pendingIntent) { intent in
+            Button(intent.confirmLabel, role: intent.isDestructive ? .destructive : nil) { run(intent) }
         } message: { intent in
             Text(intent.message(node: node))
         }
     }
 
-    // MARK: Header
+    // MARK: Toolbar
 
-    private var headerCard: some View {
-        GlassCard(padding: 18) {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            StatusPip(color: Palette.state(resource?.state ?? .unknown),
-                                      pulsing: resource?.state.isUp ?? false, size: 7,
-                                      hollow: !(resource?.state.isUp ?? false))
-                            Text(node)
-                                .font(.system(size: 24, weight: .semibold))
-                                .tracking(-0.5)
-                                .foregroundStyle(Palette.ink)
-                        }
-                        if let status = vm.status {
-                            Text("Proxmox VE \(Self.shortVersion(status.pveVersion)) · \(Format.uptimeLong(status.uptime))")
-                                .font(.system(size: 13))
-                                .foregroundStyle(Palette.inkTertiary)
-                                .lineLimit(1)
-                        }
+    private var actionsMenu: some View {
+        Menu {
+            Button("Open Shell", systemImage: "apple.terminal") { showShell = true }
+            Divider()
+            Button("Start All Guests", systemImage: "play") { pendingIntent = .startAll }
+            Button("Stop All Guests", systemImage: "stop") { pendingIntent = .stopAll }
+            Divider()
+            Button("Reboot Node", systemImage: "arrow.clockwise", role: .destructive) { pendingIntent = .reboot }
+            Button("Shut Down Node", systemImage: "power", role: .destructive) { pendingIntent = .shutdown }
+        } label: {
+            Label("Actions", systemImage: "ellipsis.circle")
+        }
+    }
+
+    // MARK: Summary
+
+    @ViewBuilder
+    private var summary: some View {
+        Section {
+            LabeledContent("Status") {
+                HStack(spacing: 6) {
+                    StatusDot(state: resource?.state ?? .unknown)
+                    Text(resource?.state.label ?? "—")
+                }
+            }
+            LabeledContent("Uptime", value: Format.uptimeLong(vm.status?.uptime ?? resource?.uptime))
+            LabeledContent("Proxmox VE", value: Format.pveVersion(vm.status?.pveVersion))
+        }
+
+        Section("Usage") {
+            UsageRow(title: "CPU",
+                     value: Format.percent(cpuFraction),
+                     detail: "\(vm.status?.cpuCount ?? Int(resource?.maxcpu ?? 0)) cores",
+                     fraction: cpuFraction, tint: Palette.accent)
+            UsageRow(title: "Memory",
+                     value: Format.bytes(vm.status?.memUsed ?? resource?.mem),
+                     detail: "of \(Format.bytes(vm.status?.memTotal ?? resource?.maxmem))",
+                     fraction: fraction(vm.status?.memUsed, of: vm.status?.memTotal) ?? resource?.memFraction ?? 0)
+            if let total = vm.status?.swapTotal, total > 0 {
+                UsageRow(title: "Swap",
+                         value: Format.bytes(vm.status?.swapUsed),
+                         detail: "of \(Format.bytes(total))",
+                         fraction: fraction(vm.status?.swapUsed, of: total) ?? 0)
+            }
+            UsageRow(title: "Root disk",
+                     value: Format.bytes(vm.status?.rootUsed ?? resource?.disk),
+                     detail: "of \(Format.bytes(vm.status?.rootTotal ?? resource?.maxdisk))",
+                     fraction: fraction(vm.status?.rootUsed, of: vm.status?.rootTotal) ?? resource?.diskFraction ?? 0)
+            if let load = vm.status?.loadAverage, load.count >= 3 {
+                LabeledContent("Load average") {
+                    Text(load.prefix(3).map { Format.number($0, fractionDigits: 2) }.joined(separator: "  "))
+                        .monospacedDigit()
+                }
+            }
+            if let wait = vm.status?.ioWait {
+                LabeledContent("IO delay", value: Format.percent(wait, decimals: 1))
+            }
+        }
+
+        if !vm.updates.isEmpty {
+            Section {
+                ForEach(vm.updates.prefix(10)) { update in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(update.package)
+                            .font(.identifier)
+                        Text("\(update.oldVersion ?? "?") → \(update.version ?? "?")")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
                     }
-                    Spacer(minLength: 8)
-                    if !vm.updates.isEmpty {
-                        TagChip(text: "\(vm.updates.count) mises à jour", tint: Palette.amber)
+                }
+                if vm.updates.count > 10 {
+                    Text("\(vm.updates.count - 10) more")
+                        .foregroundStyle(.secondary)
+                }
+                Button("Refresh Package Lists") {
+                    Task {
+                        await app.perform("Refresh package lists", node: node) { api in
+                            try await api.refreshRepositories(node)
+                        }
+                        await vm.load(using: app.client())
                     }
                 }
+            } header: {
+                Text("\(vm.updates.count) Updates Available")
+            } footer: {
+                Text("Install updates from the node's shell with apt dist-upgrade.")
+            }
+        }
 
-                if vm.metrics.count > 2 {
-                    Sparkline(values: vm.metrics.compactMap { $0["cpu"] },
-                              tint: Palette.ember, filled: true)
-                        .frame(height: 38)
-                }
-
-                VStack(spacing: 16) {
-                    VitalRow(label: "Processeur",
-                             value: Format.percent(vm.status?.cpu ?? resource?.cpuFraction ?? 0),
-                             unit: "%",
-                             fraction: vm.status?.cpu ?? resource?.cpuFraction ?? 0,
-                             leadingDetail: "\(vm.status?.cpuCount ?? Int(resource?.maxcpu ?? 0)) cœurs",
-                             trailingDetail: vm.status.map {
-                                "I/O wait " + Format.percent($0.ioWait ?? 0, decimals: 1) },
-                             tint: Palette.ember, valueSize: 19)
-
-                    VitalRow(label: "Mémoire",
-                             value: Format.bytesParts(vm.status?.memUsed ?? resource?.mem).value,
-                             unit: Format.bytesParts(vm.status?.memUsed ?? resource?.mem).unit,
-                             fraction: memFraction,
-                             leadingDetail: "sur \(Format.bytes(vm.status?.memTotal ?? resource?.maxmem))",
-                             trailingDetail: Format.percent(memFraction),
-                             valueSize: 19)
-
-                    VitalRow(label: "Racine",
-                             value: Format.bytesParts(vm.status?.rootUsed ?? resource?.disk).value,
-                             unit: Format.bytesParts(vm.status?.rootUsed ?? resource?.disk).unit,
-                             fraction: rootFraction,
-                             leadingDetail: "sur \(Format.bytes(vm.status?.rootTotal ?? resource?.maxdisk))",
-                             trailingDetail: Format.percent(rootFraction),
-                             valueSize: 19)
-                }
-
-                if let load = vm.status?.loadAverage, load.count >= 3 {
-                    Divider1px()
-                    HStack(spacing: 0) {
-                        HeroStat(value: String(format: "%.2f", load[0]), label: "charge 1 min",
-                                 tint: loadTint(load[0]))
-                        HeroStat(value: String(format: "%.2f", load[1]), label: "5 min",
-                                 tint: Palette.inkSecondary)
-                        HeroStat(value: String(format: "%.2f", load[2]), label: "15 min",
-                                 tint: Palette.inkSecondary)
-                        HeroStat(value: "\(vm.services.filter(\.isRunning).count)/\(max(vm.services.count, 1))",
-                                 label: "services", tint: Palette.inkSecondary)
+        if !vm.storages.isEmpty {
+            Section("Storage") {
+                ForEach(vm.storages) { storage in
+                    NavigationLink(value: Route.storage(node: node, storage: storage.storage)) {
+                        NodeStorageRow(storage: storage)
                     }
                 }
             }
         }
     }
 
-    /// `pve-manager/8.3.2/d4b9f1e2` → `8.3.2`
-    static func shortVersion(_ raw: String?) -> String {
-        guard let raw else { return "?" }
-        let parts = raw.split(separator: "/")
-        return parts.count > 1 ? String(parts[1]) : raw
+    private var cpuFraction: Double { vm.status?.cpu ?? resource?.cpuFraction ?? 0 }
+
+    private func fraction(_ used: Double?, of total: Double?) -> Double? {
+        guard let used, let total, total > 0 else { return nil }
+        return used / total
     }
 
-    private var memFraction: Double {
-        guard let total = vm.status?.memTotal, total > 0 else { return resource?.memFraction ?? 0 }
-        return (vm.status?.memUsed ?? 0) / total
+    // MARK: Charts
+
+    @ViewBuilder
+    private var charts: some View {
+        Section {
+            Picker("Range", selection: Binding(
+                get: { vm.timeframe },
+                set: { new in Task { await vm.changeTimeframe(new, api: app.client()) } })) {
+                ForEach(PVETimeframe.allCases) { frame in
+                    Text(frame.label).tag(frame).accessibilityLabel(frame.accessibilityName)
+                }
+            }
+            .pickerStyle(.segmented)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
+        }
+
+        Section("CPU") {
+            MetricChart(series: vm.cpuSeries, timeframe: vm.timeframe, normalized: true)
+                .padding(.vertical, 6)
+        }
+        Section("Memory") {
+            MetricChart(series: vm.memorySeries, timeframe: vm.timeframe)
+                .padding(.vertical, 6)
+        }
+        Section("Network") {
+            MetricChart(series: vm.networkSeries, timeframe: vm.timeframe)
+                .padding(.vertical, 6)
+        }
+        Section("Load") {
+            MetricChart(series: vm.loadSeries, timeframe: vm.timeframe)
+                .padding(.vertical, 6)
+        }
     }
 
-    private var rootFraction: Double {
-        guard let total = vm.status?.rootTotal, total > 0 else { return resource?.diskFraction ?? 0 }
-        return (vm.status?.rootUsed ?? 0) / total
-    }
+    // MARK: System
 
-    private func loadTint(_ value: Double) -> Color {
-        let cores = Double(vm.status?.cpuCount ?? 1)
-        return Palette.load(cores > 0 ? value / cores : 0)
-    }
+    @ViewBuilder
+    private var system: some View {
+        Section("Hardware") {
+            LabeledContent("CPU") {
+                Text(vm.status?.cpuModel ?? "—")
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Cores", value: vm.status?.cpuCount.map(String.init) ?? "—")
+            LabeledContent("Memory", value: Format.bytes(vm.status?.memTotal))
+            LabeledContent("Kernel") {
+                Text(vm.status?.kernelVersion ?? "—")
+                    .font(.caption.monospaced())
+                    .multilineTextAlignment(.trailing)
+            }
+        }
 
-    // MARK: Sections
+        if !vm.disks.isEmpty {
+            Section("Disks") {
+                ForEach(vm.disks) { DiskRow(disk: $0) }
+            }
+        }
 
-    private var overviewSection: some View {
-        VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
-            timeframePicker
+        if !vm.interfaces.isEmpty {
+            Section("Network Interfaces") {
+                ForEach(vm.interfaces.sorted { $0.iface < $1.iface }) { InterfaceRow(interface: $0) }
+            }
+        }
 
-            ChartCard(title: "Processeur", series: vm.cpuSeries, timeframe: vm.timeframe, normalized: true)
-            ChartCard(title: "Mémoire", series: vm.memorySeries, timeframe: vm.timeframe)
-            ChartCard(title: "Réseau", series: vm.networkSeries, timeframe: vm.timeframe)
-            ChartCard(title: "Charge système", series: vm.loadSeries, timeframe: vm.timeframe)
-
-            if !vm.storages.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    SectionLabel("Stockage sur ce nœud", trailing: "\(vm.storages.count)")
-                    GlassCard(padding: 0) {
-                        RowStack(data: vm.storages, separatorInset: Metrics.rowInset) { storage in
-                            NavigationLink(value: Route.storage(node: node, storage: storage.storage)) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(spacing: 6) {
-                                        Text(storage.storage)
-                                            .font(.rowTitle)
-                                            .foregroundStyle(Palette.ink)
-                                        if !storage.active { TagChip(text: "inactif", tint: Palette.rose) }
-                                        Spacer(minLength: 8)
-                                        Text("\(Format.bytes(storage.used)) / \(Format.bytes(storage.total))")
-                                            .font(.metric(12.5))
-                                            .foregroundStyle(Palette.inkSecondary)
-                                    }
-                                    MeterBar(fraction: storage.fraction)
-                                }
-                                .padding(.horizontal, Metrics.rowInset)
-                                .padding(.vertical, 11)
-                                .contentShape(Rectangle())
+        if !vm.services.isEmpty {
+            Section {
+                ForEach(vm.services) { service in
+                    ServiceRow(service: service, busy: vm.busyService == service.service)
+                        .contextMenu { serviceActions(service) }
+                        .swipeActions(edge: .trailing) {
+                            Button("Restart", systemImage: "arrow.clockwise") {
+                                serviceAction(service, "restart")
                             }
-                            .buttonStyle(.pressable)
+                            .tint(Palette.accent)
                         }
-                    }
                 }
-            }
-
-            if !vm.updates.isEmpty { updatesCard }
-        }
-    }
-
-    private var timeframePicker: some View {
-        SegmentedRail(items: PVETimeframe.allCases, label: \.label,
-                      selection: Binding(
-                        get: { vm.timeframe },
-                        set: { new in Task { await vm.changeTimeframe(new, api: app.client()) } }))
-    }
-
-    private var updatesCard: some View {
-        GlassCard(tint: Palette.amber) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    SectionLabel("Mises à jour disponibles", trailing: "\(vm.updates.count)")
-                    Spacer()
-                    Button {
-                        Task {
-                            await app.perform("Actualiser les dépôts", node: node) { api in
-                                try await api.refreshRepositories(node)
-                            }
-                            await vm.load(using: app.client())
-                        }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Palette.ember)
-                    }
-                }
-                .padding(.leading, 8)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    ForEach(vm.updates.prefix(8)) { update in
-                        HStack(spacing: 8) {
-                            Text(update.package)
-                                .font(.mono(12.5))
-                                .foregroundStyle(Palette.ink)
-                                .lineLimit(1)
-                            Spacer(minLength: 6)
-                            Text("\(update.oldVersion ?? "") → \(update.version ?? "")")
-                                .font(.mono(11.5))
-                                .foregroundStyle(Palette.inkTertiary)
-                                .lineLimit(1)
-                        }
-                    }
-                    if vm.updates.count > 8 {
-                        Text("+ \(vm.updates.count - 8) autres paquets")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Palette.inkTertiary)
-                    }
-                    Text("L'installation se fait depuis le terminal du nœud (apt dist-upgrade).")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.inkTertiary)
-                        .padding(.top, 4)
-                }
-                .padding(.leading, 8)
+            } header: {
+                Text("Services")
+            } footer: {
+                Text("\(vm.runningServices) of \(vm.services.count) running. Swipe or touch and hold a service to control it.")
             }
         }
     }
 
-    private var hardwareSection: some View {
-        VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel("Système")
-                    DetailRow(label: "Processeur", value: vm.status?.cpuModel ?? "—")
-                    DetailRow(label: "Cœurs", value: "\(vm.status?.cpuCount ?? 0)")
-                    DetailRow(label: "Noyau", value: vm.status?.kernelVersion ?? "—", monospaced: true)
-                    DetailRow(label: "Proxmox VE", value: vm.status?.pveVersion ?? "—")
-                    DetailRow(label: "Uptime", value: Format.uptimeLong(vm.status?.uptime))
-                    Divider1px()
-                    LabeledMeter(label: "Mémoire", fraction: memFraction,
-                                 detail: "\(Format.bytes(vm.status?.memUsed)) / \(Format.bytes(vm.status?.memTotal))")
-                    LabeledMeter(label: "Swap", fraction: swapFraction,
-                                 detail: "\(Format.bytes(vm.status?.swapUsed)) / \(Format.bytes(vm.status?.swapTotal))",
-                                 tint: Palette.violet)
-                }
-            }
-
-            if !vm.disks.isEmpty {
-                VStack(alignment: .leading, spacing: 9) {
-                    SectionLabel("Disques physiques", trailing: "\(vm.disks.count)")
-                    ForEach(vm.disks) { disk in DiskCard(disk: disk) }
-                }
-            }
-        }
+    @ViewBuilder
+    private func serviceActions(_ service: PVEService) -> some View {
+        Button("Start", systemImage: "play") { serviceAction(service, "start") }
+        Button("Restart", systemImage: "arrow.clockwise") { serviceAction(service, "restart") }
+        Button("Stop", systemImage: "stop", role: .destructive) { serviceAction(service, "stop") }
     }
 
-    private var swapFraction: Double {
-        guard let total = vm.status?.swapTotal, total > 0 else { return 0 }
-        return (vm.status?.swapUsed ?? 0) / total
-    }
+    // MARK: Tasks
 
-    private var networkSection: some View {
-        VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
-            ChartCard(title: "Trafic", series: vm.networkSeries, timeframe: vm.timeframe)
-
-            VStack(alignment: .leading, spacing: 10) {
-                SectionLabel("Interfaces", trailing: "\(vm.interfaces.count)")
-                GlassCard(padding: 0) {
-                    RowStack(data: vm.interfaces.sorted { $0.iface < $1.iface },
-                             separatorInset: Metrics.rowInset + 18) { iface in
-                        HStack(alignment: .top, spacing: 11) {
-                            StatusPip(color: iface.active ? Palette.mint : Palette.inkTertiary,
-                                      size: 6, hollow: !iface.active)
-                                .padding(.top, 3)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(iface.iface)
-                                        .font(.mono(14, weight: .medium))
-                                        .foregroundStyle(Palette.ink)
-                                    TagChip(text: iface.type ?? "—")
-                                    if iface.autostart { TagChip(text: "auto") }
-                                }
-                                if let cidr = iface.cidr ?? iface.address {
-                                    Text(cidr + (iface.gateway.map { " → \($0)" } ?? ""))
-                                        .font(.mono(12))
-                                        .foregroundStyle(Palette.inkSecondary)
-                                }
-                                if let ports = iface.bridgePorts, !ports.isEmpty {
-                                    Text("ports : \(ports)")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Palette.inkTertiary)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, Metrics.rowInset)
-                        .padding(.vertical, 10)
-                    }
-                }
+    @ViewBuilder
+    private var tasks: some View {
+        Section {
+            if vm.tasks.isEmpty {
+                Text("No recent tasks on this node.")
+                    .foregroundStyle(.secondary)
             }
-        }
-    }
-
-    private var servicesSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionLabel("Services", trailing: "\(vm.runningServices) actifs sur \(vm.services.count)")
-            GlassCard(padding: 0) {
-                RowStack(data: vm.services, separatorInset: Metrics.rowInset + 18) { service in
-                    HStack(spacing: 11) {
-                        StatusPip(color: service.isRunning ? Palette.mint : Palette.inkTertiary,
-                                  size: 6, hollow: !service.isRunning)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(service.name ?? service.service)
-                                .font(.system(size: 14.5))
-                                .foregroundStyle(Palette.ink)
-                            Text(service.desc ?? service.service)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Palette.inkTertiary)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 4)
-
-                        if vm.busyService == service.service {
-                            ProgressView().controlSize(.small).tint(Palette.inkSecondary)
-                        } else {
-                            Menu {
-                                Button { serviceAction(service, "start") } label: {
-                                    Label("Démarrer", systemImage: "play")
-                                }
-                                Button { serviceAction(service, "restart") } label: {
-                                    Label("Redémarrer", systemImage: "arrow.clockwise")
-                                }
-                                Button(role: .destructive) { serviceAction(service, "stop") } label: {
-                                    Label("Arrêter", systemImage: "stop")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(Palette.inkTertiary)
-                                    .frame(width: 28, height: 28)
-                                    .contentShape(Rectangle())
-                            }
-                        }
-                    }
-                    .padding(.horizontal, Metrics.rowInset)
-                    .padding(.vertical, 10)
-                }
-            }
-        }
-    }
-
-    private var tasksSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionLabel("Tâches du nœud", trailing: "\(vm.tasks.count)")
-            GlassCard(padding: 0) {
-                if vm.tasks.isEmpty {
-                    Text("Aucune tâche enregistrée.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Palette.inkTertiary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 26)
-                } else {
-                    RowStack(data: vm.tasks, separatorInset: Metrics.rowInset + 26) { task in
-                        NavigationLink(value: Route.task(node: node, upid: task.upid,
-                                                         title: Format.taskType(task.type))) {
-                            TaskRow(task: task).padding(.horizontal, Metrics.rowInset)
-                        }
-                        .buttonStyle(.pressable)
-                    }
+            ForEach(vm.tasks) { task in
+                NavigationLink(value: Route.task(node: node, upid: task.upid, title: Format.taskType(task.type))) {
+                    TaskRow(task: task)
                 }
             }
         }
@@ -456,7 +295,7 @@ struct NodeDetailView: View {
     private func serviceAction(_ service: PVEService, _ command: String) {
         vm.busyService = service.service
         Task {
-            await app.perform("\(command.capitalized) \(service.service)", node: node) { api in
+            await app.perform("\(command.capitalized) \(service.name ?? service.service)", node: node) { api in
                 try await api.serviceCommand(node, service: service.service, command: command)
             }
             await vm.load(using: app.client())
@@ -468,19 +307,19 @@ struct NodeDetailView: View {
         Task {
             switch intent {
             case .reboot:
-                await app.perform("Redémarrage de \(node)", node: node) { api in
+                await app.perform("Reboot \(node)", node: node) { api in
                     try await api.nodePower(node, command: "reboot")
                 }
             case .shutdown:
-                await app.perform("Extinction de \(node)", node: node) { api in
+                await app.perform("Shut down \(node)", node: node) { api in
                     try await api.nodePower(node, command: "shutdown")
                 }
             case .startAll:
-                await app.perform("Démarrage groupé", node: node) { api in
+                await app.perform("Start all guests on \(node)", node: node) { api in
                     try await api.startAllGuests(node)
                 }
             case .stopAll:
-                await app.perform("Arrêt groupé", node: node) { api in
+                await app.perform("Stop all guests on \(node)", node: node) { api in
                     try await api.stopAllGuests(node)
                 }
             }
@@ -490,90 +329,153 @@ struct NodeDetailView: View {
 
 enum NodePowerIntent: Identifiable {
     case reboot, shutdown, startAll, stopAll
-    var id: Int {
-        switch self {
-        case .reboot: return 0
-        case .shutdown: return 1
-        case .startAll: return 2
-        case .stopAll: return 3
-        }
-    }
+
+    var id: String { title }
+
+    var isDestructive: Bool { self != .startAll }
+
     var title: String {
         switch self {
-        case .reboot: return "Redémarrer le nœud ?"
-        case .shutdown: return "Éteindre le nœud ?"
-        case .startAll: return "Démarrer toutes les instances ?"
-        case .stopAll: return "Arrêter toutes les instances ?"
+        case .reboot: return "Reboot this node?"
+        case .shutdown: return "Shut down this node?"
+        case .startAll: return "Start all guests?"
+        case .stopAll: return "Stop all guests?"
         }
     }
+
     var confirmLabel: String {
         switch self {
-        case .reboot: return "Redémarrer"
-        case .shutdown: return "Éteindre"
-        case .startAll: return "Démarrer"
-        case .stopAll: return "Arrêter"
+        case .reboot: return "Reboot"
+        case .shutdown: return "Shut Down"
+        case .startAll: return "Start All"
+        case .stopAll: return "Stop All"
         }
     }
+
     func message(node: String) -> String {
         switch self {
         case .reboot:
-            return "Toutes les VM et conteneurs de \(node) seront interrompus le temps du redémarrage."
+            return "Every guest on \(node) will be interrupted while it restarts."
         case .shutdown:
-            return "\(node) sera éteint. Vous devrez le rallumer physiquement ou via IPMI/Wake-on-LAN."
+            return "\(node) will power off. You'll need physical access, IPMI or Wake-on-LAN to turn it back on."
         case .startAll:
-            return "Proxmox démarrera les instances configurées en autostart sur \(node)."
+            return "Guests on \(node) configured to start at boot will be started."
         case .stopAll:
-            return "Toutes les instances de \(node) recevront une demande d'arrêt."
+            return "Every guest on \(node) will be sent a shutdown request."
         }
     }
 }
 
-/// Physical disk card with SMART state.
-struct DiskCard: View {
+// MARK: - Rows
+
+private struct NodeStorageRow: View {
+    var storage: PVEStorage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(storage.storage)
+                    .lineLimit(1)
+                if !storage.active {
+                    Text("Inactive")
+                        .font(.caption)
+                        .foregroundStyle(Palette.critical)
+                }
+                Spacer(minLength: 8)
+                Text(Format.percent(storage.fraction))
+                    .font(.metricBody)
+                    .fixedSize()
+            }
+            CapacityBar(fraction: storage.fraction)
+            Text("\(Format.bytes(storage.used)) of \(Format.bytes(storage.total))")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct DiskRow: View {
     var disk: PVEDisk
 
-    private var healthColor: Color {
-        switch (disk.health ?? "").uppercased() {
-        case "PASSED", "OK": return Palette.mint
-        case "": return Palette.inkTertiary
-        default: return Palette.amber
-        }
-    }
-
-    private var isSolidState: Bool {
-        let type = (disk.type ?? "").lowercased()
-        return type.contains("ssd") || type.contains("nvme")
+    private var healthy: Bool {
+        ["PASSED", "OK"].contains((disk.health ?? "").uppercased())
     }
 
     var body: some View {
-        GlassCard(padding: 15) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    StatusPip(color: healthColor, size: 6,
-                              hollow: (disk.health ?? "").uppercased() != "PASSED")
-                    Text(disk.devpath)
-                        .font(.mono(14, weight: .medium))
-                        .foregroundStyle(Palette.ink)
-                    Spacer(minLength: 8)
-                    Text(disk.health ?? "—")
-                        .font(.system(size: 12))
-                        .foregroundStyle(healthColor)
-                }
-
-                Text([disk.vendor, disk.model].compactMap { $0 }.joined(separator: " "))
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Palette.inkTertiary)
-                    .lineLimit(1)
-
-                HStack(spacing: 12) {
-                    MiniFact(label: "Taille", value: Format.bytes(disk.size))
-                    MiniFact(label: "Type", value: isSolidState ? (disk.type ?? "ssd") : "hdd")
-                    MiniFact(label: "Usage", value: disk.used ?? "libre")
-                    if let wear = disk.wearout, wear >= 0, wear <= 100 {
-                        MiniFact(label: "Usure", value: "\(Int(100 - wear)) %")
-                    }
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(disk.devpath)
+                    .font(.identifier)
+                Spacer(minLength: 8)
+                if let health = disk.health {
+                    Label(health.capitalized, systemImage: healthy ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(healthy ? Palette.positive : Palette.warning)
+                        .labelStyle(.titleAndIcon)
                 }
             }
+            Text([disk.model, Format.bytes(disk.size), disk.type?.uppercased()]
+                .compactMap { $0 }.joined(separator: " · "))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            if let wear = disk.wearout, wear >= 0, wear <= 100 {
+                Text("\(Int(100 - wear))% wear")
+                    .font(.subheadline)
+                    .foregroundStyle(wear < 20 ? Palette.warning : .secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct InterfaceRow: View {
+    var interface: PVENetworkInterface
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                StatusDot(state: interface.active ? .online : .offline, size: 7)
+                Text(interface.iface)
+                    .font(.identifier)
+                Text(interface.type ?? "")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if let address = interface.cidr ?? interface.address {
+                Text(address + (interface.gateway.map { "  via \($0)" } ?? ""))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            if let ports = interface.bridgePorts, !ports.isEmpty {
+                Text("Ports: \(ports)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct ServiceRow: View {
+    var service: PVEService
+    var busy: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            StatusDot(state: service.isRunning ? .running : .stopped, size: 7)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(service.name ?? service.service)
+                if let description = service.desc {
+                    Text(description)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            if busy { ProgressView().controlSize(.small) }
         }
     }
 }
